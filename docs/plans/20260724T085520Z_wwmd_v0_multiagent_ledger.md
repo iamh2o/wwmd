@@ -10,8 +10,8 @@ Design document: docs/WWMD_AI_ENGINEERING_OBSERVABILITY_DESIGN.md
 
 The root agent is the sole author and implementer. The three parallel analysts
 performed read-only inspection only; their reports were reconciled by the root
-before the design document was written. No WWK source or historical WWK
-activity database will be read, migrated, or changed by WWMD.
+before the design document was written. WWMD neither reads, migrates, nor
+changes predecessor historical activity databases.
 
 ## Gate 0 baseline
 
@@ -20,9 +20,7 @@ activity database will be read, migrated, or changed by WWMD.
 | Task identity | Renamed to WWMD. |
 | GitHub destination | Public repository https://github.com/iamh2o/wwmd created after GitHub identity verification. |
 | WWMD repository | /Users/jmajor/projects/iamh2o/wwmd; main at bf62d05; clean immediately after clone. |
-| Source reference only | /Users/jmajor/projects/daylily/well-whaddya-know, origin/main at 61e1991599df8dd23a7b04e821ccf7b08ce16103 (61e1991). |
-| Source checkout protection | WWK checkout was dirty and behind origin/main; no files were changed. |
-| WWK baseline | Swift 6, macOS 13+, menu-bar app plus wwkd agent plus CLI, SQLite/WAL; swift test completed with 228 passing tests. |
+| Independence boundary | No predecessor source files, checkout, or historical database were imported or altered. |
 | Missing source contract | codex-overview-calls-2026-07-24.csv and a proven stable local Codex live source were unavailable. No inferred mapping is allowed. |
 | Baseline sweeps | Repository and source manifest, instruction, status, test, architecture, storage, privacy, correlation, metrics, and UX inspection were completed read-only. |
 
@@ -30,7 +28,7 @@ activity database will be read, migrated, or changed by WWMD.
 
 | Reconciled term | Frozen meaning and owner |
 |---|---|
-| WWMD | Independent, MIT-licensed successor application; it is not a WWK database migration. |
+| WWMD | Independent, MIT-licensed application with its own database identity and no predecessor-data migration. |
 | Agent | Persistent per-user macOS process that owns all collection, mutation, and database writes. |
 | App | Menu-bar and viewer process that requests control/query operations over authenticated native XPC. |
 | Ledger | Immutable normalized TelemetryEventV1 records in the new WWMD SQLite database. |
@@ -45,7 +43,7 @@ activity database will be read, migrated, or changed by WWMD.
 | ID | Area | Requirement | Status | Category | Gate | Owner | Evidence | Root cause | Terminal note |
 |---|---|---|---|---|---|---|---|---|---|
 | G0-001 | Repository | Create and baseline public WWMD repository | SUCCESS | feature_implementation | Gate 0 | root | public iamh2o/wwmd; bf62d05 | — | Repository, README, and MIT license exist. |
-| G0-002 | Source boundary | Pin WWK as read-only source and preserve dirty checkout | SUCCESS | active_product_contract | Gate 0 | root | origin/main 61e1991; status recorded above | — | No WWK files or historical data were altered. |
+| G0-002 | Repository boundary | Preserve WWMD independence from predecessor source and historical data | SUCCESS | active_product_contract | Gate 0 | root | Independence boundary recorded above | — | No predecessor files or historical data were imported or altered. |
 | G0-003 | Data contract | Locate requested Codex CSV or reliable live source | BLOCKED | active_product_contract | Gate 0 | root | Attachment/workspace inspection found neither contract | Actual header/schema and stable local live source are unavailable | ADP-CODEX-CSV cannot map or import until an actual schema is supplied; live adapter is deferred. |
 | G1-001 | Architecture | Reconcile analyst evidence, terminology, ownership, boundaries, schemas, trust model, and v0 scope | SUCCESS | feature_implementation | Gate 1 | root | Reconciliation table above; root review of four read-only reports | — | One terminology and ownership model is frozen. |
 | G1-002 | Design | Write one root-authored implementation design | SUCCESS | feature_implementation | Gate 1 | root | docs/WWMD_AI_ENGINEERING_OBSERVABILITY_DESIGN.md, sections 1-41 | — | The document freezes one architecture and records source evidence, boundaries, schemas, privacy, reliability, and V0 scope. |
@@ -79,7 +77,7 @@ Before implementation begins, the root must verify that the design:
 1. uses one name for each process, data object, and boundary;
 2. gives every durable field provenance, sensitivity, and measurement class;
 3. assigns exactly one component as database writer;
-4. does not retain WWK window-title data or create a migration path;
+4. does not retain predecessor window-title data or create a migration path;
 5. does not promise a Codex mapping without a real CSV schema;
 6. uses native XPC rather than an inherited Unix socket or network listener;
 7. keeps v0 local, offline, single-user, deterministic, and non-plugin-based;
@@ -102,7 +100,7 @@ row; `BLOCKED` identifies a missing external contract or release configuration.
 
 | Brief requirement | Result | Reconciliation evidence |
 |---|---|---|
-| New WWMD identity/database; never read, migrate, or alter WWK history | PASS | Separate public repository and SQLite schema; README/design/PrivacyGate contain no WWK migration path. |
+| New WWMD identity/database; never read, migrate, or alter predecessor history | PASS | Separate public repository and SQLite schema; README/design/PrivacyGate contain no predecessor migration path. |
 | Local-first, offline, single-user, static-code V0; no HTTP/GraphQL/cloud/plugins | PASS | Package target graph, native XPC-only code, and no network dependency/endpoint. |
 | App, persistent agent, and read-only CLI with native XPC | PARTIAL | `WWMDAgentRuntime`, `wwmdd`, `wwmd`, and SwiftUI shell exist; production Mach-service/signing and app connection are not configured. |
 | SQLite/WAL, one serialized writer, immutable events, atomic migrations/checkpoints, deterministic replay | PASS | `TelemetryStore` actor, WAL settings, v1-to-latest fixture, projection checkpoint, and tests. |

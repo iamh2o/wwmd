@@ -43,10 +43,10 @@ In scope: Package.swift; Sources/WWMDCore; Sources/WWMDStorage;
 Sources/WWMDAdapters; Sources/WWMDAnalytics; Sources/WWMDIPC; Sources/wwmdd;
 Sources/wwmd; Sources/WWMDApp; and docs/WWMD_AI_ENGINEERING_OBSERVABILITY_DESIGN.md.
 
-Out of scope: the read-only WWK source repository, a production Apple
-Developer signing account, actual Codex exports, cloud/network services, CI
-hosting, and future team features. Existing WWMD source is a local foundation,
-not a claim of a complete release daemon.
+Out of scope: predecessor repositories and historical databases, a production
+Apple Developer signing account, actual Codex exports, cloud/network services,
+CI hosting, and future team features. Existing WWMD source is a local
+foundation, not a claim of a complete release daemon.
 
 ## System model
 

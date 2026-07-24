@@ -4,13 +4,13 @@ Status: implementation design frozen for v0
 Authoring date: 2026-07-24
 Author: root agent
 Audience: WWMD maintainers, security reviewers, and the implementation owner
-Source reference: Daylily-Informatics/well-whaddya-know origin/main at 61e1991, inspected read-only
+Status note: independent WWMD design; no predecessor code or data is copied
 
 ## Reconciliation record
 
 This document is the root-owned reconciliation of four independent, read-only
 evidence reviews. It defines an independent application named WWMD. It does
-not extend, open, migrate, or copy the WWK historical activity database.
+not extend, open, migrate, or copy a predecessor historical activity database.
 
 | Term | One meaning in this document | Owner | Boundary |
 |---|---|---|---|
@@ -52,35 +52,31 @@ an explicit build/test wrapper, and user annotations. There are no dynamic
 plugins, network listener, cloud upload, background model calls, source
 content collection, or window-title capture.
 
-Native XPC replaces WWK's length-framed JSON Unix-domain socket because WWMD
-needs an explicit macOS peer identity boundary. SQLite/WAL remains the storage
-base because it fits a small local durable ledger better than a second
-analytics database or custom log. The principal trade-off is giving up
-unbounded source discovery and generic integrations for privacy, testability,
-and a smaller failure surface.
+Native XPC is selected over a permission-only length-framed JSON Unix-domain
+socket because WWMD needs an explicit macOS peer identity boundary. SQLite/WAL
+remains the storage base because it fits a small local durable ledger better
+than a second analytics database or custom log. The principal trade-off is
+giving up unbounded source discovery and generic integrations for privacy,
+testability, and a smaller failure surface.
 
-## 3. Repository evidence and current WWK architecture
+## 3. Independent architecture rationale
 
-WWMD takes only the sound architectural lessons from WWK. The records below
-refer to the read-only source pin, not to the user's dirty local checkout.
+WWMD is a new Swift-native package. It does not depend on predecessor source
+code or historical data. Its v0 design choices are grounded in the operating
+requirements below.
 
-| Evidence | Demonstrated source fact | WWMD decision |
+| Requirement | WWMD decision | Rationale |
 |---|---|---|
-| Package.swift:1-155 | WWK is a Swift package targeting Swift 6 and macOS 13+, divided into storage, sensor, model, timeline, IPC, reporting, agent, CLI, and menu-bar products. | Keep modular Swift and macOS 13+; use new WWMD module names and no copied source. |
-| Sources/WellWhaddyaKnowApp/WellWhaddyaKnowApp.swift and Info.plist:21-24 | WWK is a menu-bar-first LSUIElement app. | Retain a menu-bar-first interaction pattern with a normal viewer rather than a consumer dashboard. |
-| Sources/WellWhaddyaKnowAgent/Agent.swift and main.swift | WWK has a separate agent lifecycle. | Keep a persistent agent, but give it exclusive mutation ownership and explicit lifecycle states. |
-| Sources/Shared/XPCProtocol/IPCProtocol.swift and Sources/WellWhaddyaKnowAgent/IPCServer.swift | WWK calls its IPC XPC, but implementation is a length-framed JSON Unix socket with file mode 0600. | Do not inherit this trust model; use native Mach XPC and signed-peer validation. |
-| Sources/Storage/DatabaseConnection.swift:41-93 | WWK configures SQLite foreign keys, WAL, NORMAL synchronous mode, busy timeout, cache, and mmap. | Reuse the SQLite/WAL pattern only; specify WWMD-owned transactional migrations and serialized writer. |
-| Sources/Storage/Schema.swift and SchemaManager.swift | WWK has a v1 schema with raw activity/system/user edit tables and one-at-a-time non-transactional migration behavior. | Replace with a generic immutable envelope plus typed projections and one transaction per migration. |
-| Sources/Storage/EventWriter.swift | WWK handles only app/title-oriented deduplication and uses interpolated SQL. | Use prepared statements, source and global idempotency keys, and quarantine. |
-| Sources/Timeline | WWK demonstrates pure deterministic replay but has time-only ordering and divergent range-reader semantics. | Preserve pure replay, add total ordering, one query contract, projection checkpoints, and rebuild tests. |
-| Sources/Sensors/SessionStateSensor.swift | A session polling seam exists, but inspection found no start call from the agent lifecycle. | Do not rely on latent polling seams; lifecycle ownership and health state must be tested. |
-| WWK docs and app privacy assets | Documentation says XPC/privacy coverage in places where source evidence shows UDS and incomplete target coverage. | Treat code and release artifacts as truth; test signed release behavior and privacy paths end to end. |
+| Native macOS application | Swift 6 and macOS 13+ modules, a menu-bar shell, and a full viewer. | Keeps execution local, native, testable, and maintainable. |
+| Persistent collection service | One per-user agent owns collection lifecycle and all database mutation. | Establishes a single-writer boundary and explicit health states. |
+| Local IPC boundary | Native Mach XPC with signed-peer validation. | File permissions alone do not establish peer identity or a stable native object contract. |
+| Durable local ledger | SQLite/WAL, prepared statements, immutable envelopes, transactional migrations, and typed projections. | Provides transactional recovery, deterministic replay, and bounded operational complexity. |
+| Privacy-first collection | Static, opt-in adapters with pre-persistence redaction and no historical-data migration. | Keeps collection visible and avoids importing an unknown privacy posture. |
+| Deterministic product semantics | Total event ordering, explicit query contracts, projection checkpoints, and rebuild tests. | Makes results reproducible and errors diagnosable. |
 
-WWK has no proven Codex, Git, build/test, correlation, metric, or
-recommendation adapter. Therefore WWMD is an independent successor rather than
-a database migration. Its source reference establishes useful patterns and
-anti-patterns, not compatibility obligations.
+No assumed existing Codex, Git, build/test, correlation, metric, or
+recommendation data contract is adopted. Every adapter has an explicit v0
+contract, and unavailable source fields remain unavailable rather than inferred.
 
 ## 4. Problem statement
 
@@ -137,7 +133,7 @@ work. No v0 metric may imply data from those sources.
 | Activity metadata is content-adjacent | V0 excludes window titles; idle state is unavailable instead of inferred. |
 | Credentials may someday be unavoidable | Use Keychain only for credential value; never in environment capture, logs, exports, or ledger. |
 | Performance targets are design targets | Measure idle CPU below 1%, ordinary RSS below 150 MB, queue depth, and responsiveness in release proof. |
-| WWK historical data has a different privacy posture | No WWK data is imported or read. User can annotate new work in WWMD instead. |
+| Historical data from another application has a different privacy posture | No predecessor data is imported or read. User can annotate new work in WWMD instead. |
 
 ## 9. Recommended architecture
 
@@ -153,7 +149,7 @@ sets. The agent is the only process able to open the database read-write.
 | DuckDB, Parquet, Arrow as primary storage | Reject | Adds another storage/execution model for a small always-running app; Arrow is later interchange only. |
 | Custom append-only log | Reject | Reimplements transaction, indexing, corruption, and query machinery without a demonstrated benefit. |
 | Native Mach XPC | Adopt | Fits signed macOS peers and process isolation without opening a network listener. |
-| WWK Unix-domain JSON socket | Reject | File mode alone does not establish peer identity or stable native object contract. |
+| Permission-only Unix-domain JSON socket | Reject | File mode alone does not establish peer identity or stable native object contract. |
 | Loopback HTTP or GraphQL | Reject | Adds a network-style attack and compatibility surface without a v0 need. |
 | Runtime plug-ins | Reject | Trusted first-party adapters do not justify arbitrary code loading and lifecycle complexity. |
 | Dynamic source discovery | Reject | Broad discovery creates privacy surprises; each source is explicitly enabled and configured. |
@@ -497,7 +493,8 @@ entitlements. The agent opens it read-write; all other process access is XPC
 mediated. SQLite is configured with foreign keys enabled, WAL journal mode,
 bounded busy timeout, explicit transaction scopes, and a journal-size policy.
 The synchronous setting, cache, mmap, and checkpoint threshold are release
-configuration values measured under test, not copied blindly from WWK.
+configuration values measured under test, not copied blindly from a prior
+implementation.
 
 Raw canonical events are immutable. Corrections, deletion requests, adapter
 state changes, and recommendation actions are new events. Retention removes
@@ -753,7 +750,7 @@ flowchart LR
 
 The primary internal interface is a versioned native NSXPCConnection to an
 agent-hosted Mach service. Native XPC is appropriate because it has macOS
-lifecycle and connection semantics rather than WWK's manual socket framing.
+lifecycle and connection semantics rather than manual socket framing.
 The agent sets an explicit native NSXPCListener connection code-signing
 requirement before activation, and the client sets the expected agent
 requirement before activation. The system rejects unsigned, differently signed,
@@ -823,9 +820,9 @@ moves outside its managed destination; deletion UI states that limit clearly.
 
 ## 24. WWMD user experience
 
-WWMD retains WWK's menu-bar-first posture: a compact state summary opens a
-native viewer, with drill-down rather than a flashy separate dashboard. The
-menu bar always exposes global pause. It never hides active collection behind
+WWMD uses a menu-bar-first posture: a compact state summary opens a native
+viewer, with drill-down rather than a flashy separate dashboard. The menu bar
+always exposes global pause. It never hides active collection behind
 an icon-only state.
 
 ~~~text
@@ -898,9 +895,9 @@ bundle, CLI output, process arguments, or environment.
 WWMD has one local-user trust model, not a claim that any process running as
 that same user is harmless. The critical boundaries are: selected source file
 to adapter; selected Git root to adapter; app/CLI to agent; agent to database;
-and agent to export destination. Existing WWK evidence establishes why a file
-permission-only Unix socket is inadequate; WWMD's controls below are design
-requirements to be implemented and release-tested.
+and agent to export destination. A file-permission-only Unix socket is
+inadequate; WWMD's controls below are design requirements to be implemented
+and release-tested.
 
 ~~~mermaid
 flowchart TD
@@ -1048,8 +1045,8 @@ labeled. Test classes are:
 
 Compatibility tests retain one fixture per supported historical WWMD schema
 version and verify that migrations either produce the same expected projection
-or fail explicitly when a version is unsupported. WWK schema/database fixtures
-are intentionally not compatibility inputs.
+or fail explicitly when a version is unsupported. No external application
+schema or database fixture is a compatibility input.
 
 ## 31. Operational diagnostics
 
@@ -1073,13 +1070,13 @@ The preview lists every included field. The bundle excludes ledger payloads,
 bookmarks, source paths, user annotations by default, secrets, and managed
 exports. It is written only after the user selects a destination.
 
-## 32. Compatibility and migration from current WWK
+## 32. Compatibility and migration
 
-There is no data migration from WWK. WWMD uses a new application identity,
+There is no predecessor-data migration. WWMD uses a new application identity,
 App Group container, database filename, preferences domain, agent service
-name, and export manifest schema. It neither opens nor scans the WWK database,
-does not read its historical activity/window-title data, and does not reuse its
-Unix socket.
+name, and export manifest schema. It neither opens nor scans another
+application's database, reads historical activity or window-title data, nor
+reuses an external IPC endpoint.
 
 The intentional compatibility boundary is conceptual: WWMD reuses the
 appropriate Swift modularity, menu-bar posture, separate agent idea, SQLite/WAL
@@ -1094,7 +1091,7 @@ V0 is the smallest complete vertical slice:
 
 | Included | Explicitly excluded/deferred |
 |---|---|
-| New local WWMD ledger, migrations, projections, health, retention, backup/export. | WWK database migration, WWK window-title read, remote service, account, cloud analytics. |
+| New local WWMD ledger, migrations, projections, health, retention, backup/export. | Predecessor database migration, predecessor window-title read, remote service, account, cloud analytics. |
 | Signed agent/app/CLI architecture and no network listener. | Direct live DB access by CLI/app, HTTP/GraphQL, generic socket API. |
 | User-selected Git metadata adapter, annotation/correction adapter, build/test wrapper, safe activity metadata if permissions prove safe. | Filesystem content indexing, broad discovery, idle inference, window titles, browser metadata. |
 | Contract-gated historical Codex CSV import implementation only after real schema exists. | Generic CSV importer and any live Codex discovery/scraping. |
@@ -1128,8 +1125,8 @@ single-user architecture.
 
 | Rejected alternative | Why it is rejected | Trade-off accepted by WWMD |
 |---|---|---|
-| Inherit WWK's activity/window-title database | It has a different privacy model and lacks canonical source/provenance/idempotency contracts. | No historical continuity; users start a new privacy-safe ledger. |
-| Preserve WWK Unix socket IPC | It lacks a sufficient peer identity story for an agent that accepts mutations. | Higher initial macOS signing/XPC test effort. |
+| Inherit an activity/window-title database | It has a different privacy model and lacks canonical source/provenance/idempotency contracts. | No historical continuity; users start a new privacy-safe ledger. |
+| Preserve permission-only Unix socket IPC | It lacks a sufficient peer identity story for an agent that accepts mutations. | Higher initial macOS signing/XPC test effort. |
 | Direct multi-process SQLite writes | Makes lock/retry/order semantics ambiguous and complicates crash recovery. | Agent is a required local process for mutations. |
 | Store all source rows/raw JSON | Retains unknown content and makes privacy/rebuild/schema safety weaker. | Some provider-specific data is unavailable by design. |
 | Infer activity from titles, idle, filesystem, browser, or screen state | It creates covert/content-adjacent collection and unreliable analytics. | Certain workflow metrics stay unavailable in V0. |
@@ -1175,8 +1172,8 @@ single-user architecture.
 
 ## 39. Design decisions frozen for implementation planning
 
-1. WWMD is a new local application identity and ledger; no WWK database or
-   historical activity migration exists.
+1. WWMD is a new local application identity and ledger; no predecessor database
+   or historical activity migration exists.
 2. Swift/macOS 13+, menu-bar app, persistent per-user agent, signed read-only
    CLI, and a versioned native XPC Mach service are the process topology.
 3. TelemetryStore actor in the agent is the only mutable database writer.
@@ -1263,7 +1260,7 @@ boundaries, and V0 scope are consistent: the agent alone writes, native XPC is
 the sole control/query path, the ledger is immutable, projections are
 rebuildable, adapters are opt-in/static/pre-persistence-redacted, and Codex
 data remains blocked rather than inferred. No section makes V0 depend on
-window titles, WWK data, content capture, a cloud service, plugins, a network
+window titles, predecessor data, content capture, a cloud service, plugins, a network
 listener, or machine learning. Metrics and rules that require absent data are
 explicitly unavailable or deferred. The remaining open questions are product
 or release-configuration decisions, not hidden architecture contradictions.

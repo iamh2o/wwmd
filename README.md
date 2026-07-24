@@ -5,8 +5,14 @@ observable engineering evidence around AI-assisted work. It is designed to
 answer “what engineering value am I receiving?” rather than to be a token-only
 dashboard.
 
-It is a new application and database. It does not read, migrate, or retain
-WWK historical activity or window-title data.
+It is an independent application and database. It does not read, migrate, or
+retain historical activity or window-title data from another application.
+
+## Quick start
+
+For macOS/Swift/Git prerequisites, exact setup commands, local database health
+verification, development-app startup, and the intentional signed-XPC boundary,
+follow the [quickstart](docs/QUICKSTART.md).
 
 ## Current foundation
 
