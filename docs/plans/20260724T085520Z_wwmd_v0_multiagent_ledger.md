@@ -66,6 +66,7 @@ changes predecessor historical activity databases.
 | PRIV-001 | Privacy | Persistent consent/pause, inclusion/exclusion, retention, redaction, and provenance | IN_PROGRESS | feature_implementation | Gate 5 | root | Core PrivacyGate opaque-metadata/secret tests; Store collection/adapter state, scoped purge, checksum-guarded managed deletion; runtime opt-in-before-read/run checks | Repository allowlist/bookmarks, native deletion UI, and source-adapter consent views are not complete | Persistent global pause, explicit adapter opt-in state, core redaction rejection, provenance, retention primitive, and a bounded agent-mediated deletion path are implemented. |
 | DEL-001 | Privacy | Complete local deletion including WAL/SHM/backups/exports selected by user | IN_PROGRESS | feature_implementation | Gate 5 | root | Storage v4 managed-output/deletion-receipt tables; two-phase runtime deletion request; 60-second nonce; stale/missing/changed output tests; swift test -> 45 passed | Complete database/WAL/SHM removal must run only after the app stops, and native selection/confirmation UI is not configured | Explicit bounded event deletion and exact registered export/backup deletion are runtime-owned, checksum-guarded, revision-bound, and receipt-backed. No raw path or default-all deletion is accepted. |
 | SEC-001 | Release proof | XPC peer trust, codesigning configuration, and injection resistance | NO_LONGER_NEEDED | active_product_contract | Gate 6 | root | User-authorized V0 architecture amendment | V0 has no cross-process peer boundary | Revisit only if a future signed multi-process release is approved. |
+| DIST-001 | Distribution | Reproducible user-local macOS app bundle | SUCCESS | feature_implementation | Gate 6 | root | `Packaging/Info.plist`; `scripts/package-macos-app.sh`; release bundle validated and installed at `/Users/jmajor/Applications/WWMD.app` | — | The app is ad-hoc signed for this Mac, does not overwrite existing bundles, and launches as a menu-bar app without a service installation. |
 | REL-001 | Release proof | Crash, disk, clock, sleep/wake, adapter, and source rotation recovery proof | OPEN | contract_test | Gate 6 | root | Planned fault-injection tests | — | — |
 | PERF-001 | Release proof | 24-hour soak and measured idle CPU/RSS/backpressure evidence | OPEN | contract_test | Gate 6 | root | Planned benchmark receipt | — | — |
 | FINAL-001 | Release proof | Terminal ledger reconciliation and release documentation | OPEN | contract_test | Gate 6 | root | Final review | — | — |
@@ -88,7 +89,7 @@ Before implementation begins, the root must verify that the design:
 ## Current status
 
 Working rows: 13 (10 IN_PROGRESS, 3 OPEN)
-Terminal rows: 14 (9 SUCCESS, 2 BLOCKED, 3 NO_LONGER_NEEDED)
+Terminal rows: 15 (10 SUCCESS, 2 BLOCKED, 3 NO_LONGER_NEEDED)
 Objective complete: no. Foundation/export, in-process bounded query, managed deletion, and app local health/pause/safe-dashboard foundations are complete; collection lifecycle, drill-down/correction/deletion views, full database deletion lifecycle, and recovery/performance proof remain. Native XPC release proof is deferred rather than a V0 gate.
 
 ## User-authorized V0 architecture amendment: single-process local mode

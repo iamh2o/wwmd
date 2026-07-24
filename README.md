@@ -70,6 +70,19 @@ and choose **Open selected database**. Do not run `wwmdd` against that same
 database while the app is open: both supported entrypoints acquire the same
 exclusive local lease.
 
+## Install a local macOS app bundle
+
+For a normal user-local application bundle, build and install WWMD explicitly:
+
+~~~sh
+scripts/package-macos-app.sh --install-dir "$HOME/Applications"
+open "$HOME/Applications/WWMD.app"
+~~~
+
+The installer refuses to overwrite an existing `WWMD.app`. This is an ad-hoc
+signed local build for this Mac, not a Developer ID-signed or notarized public
+release. It installs no launch agent, XPC service, socket, or daemon.
+
 ## Design and ledger
 
 - [Architecture design](docs/WWMD_AI_ENGINEERING_OBSERVABILITY_DESIGN.md)
