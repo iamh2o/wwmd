@@ -100,9 +100,10 @@ Run the native development UI from the checkout:
 swift run WWMDApp
 ~~~
 
-This starts the menu-bar/viewer shell. At the current foundation stage it is
-not connected to a release-configured agent service, so it does not imply that
-collection, summaries, or exports are active.
+This starts the menu-bar/viewer shell. Click the WWMD menu-bar item, then
+click **Open WWMD** to show the single main viewer window. At the current
+foundation stage it is not connected to a release-configured agent service, so
+it does not imply that collection, summaries, or exports are active.
 
 ## Production XPC prerequisite
 
