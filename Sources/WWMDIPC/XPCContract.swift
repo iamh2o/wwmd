@@ -144,6 +144,64 @@ public struct XPCCollectionStateRequest: Codable, Equatable, Sendable {
     }
 }
 
+public enum XPCDeletionPhase: String, Codable, Equatable, Sendable {
+    case preview
+    case confirm
+}
+
+public struct XPCDeletionEventScope: Codable, Equatable, Sendable {
+    public let from: Date
+    public let to: Date
+    public let repositoryID: String?
+    public let workUnitID: String?
+    public let includeUserSensitiveEvents: Bool
+
+    public init(
+        from: Date,
+        to: Date,
+        repositoryID: String? = nil,
+        workUnitID: String? = nil,
+        includeUserSensitiveEvents: Bool
+    ) {
+        self.from = from
+        self.to = to
+        self.repositoryID = repositoryID
+        self.workUnitID = workUnitID
+        self.includeUserSensitiveEvents = includeUserSensitiveEvents
+    }
+}
+
+/// A deletion request names only an explicit time-bounded event scope and/or
+/// IDs of outputs the agent has already registered. It never carries a path.
+public struct XPCDeletionScope: Codable, Equatable, Sendable {
+    public let eventScope: XPCDeletionEventScope?
+    public let managedOutputIDs: [UUID]
+
+    public init(eventScope: XPCDeletionEventScope?, managedOutputIDs: [UUID]) {
+        self.eventScope = eventScope
+        self.managedOutputIDs = managedOutputIDs
+    }
+}
+
+public struct XPCDeletionRequest: Codable, Equatable, Sendable {
+    public let envelope: XPCRequestEnvelope
+    public let phase: XPCDeletionPhase
+    public let scope: XPCDeletionScope?
+    public let confirmationNonce: UUID?
+
+    public init(
+        envelope: XPCRequestEnvelope,
+        phase: XPCDeletionPhase,
+        scope: XPCDeletionScope? = nil,
+        confirmationNonce: UUID? = nil
+    ) {
+        self.envelope = envelope
+        self.phase = phase
+        self.scope = scope
+        self.confirmationNonce = confirmationNonce
+    }
+}
+
 public enum XPCContractError: Error, Equatable, Sendable, LocalizedError {
     case incompatibleMajorVersion
     case capabilityDoesNotPermitKind
@@ -151,6 +209,9 @@ public enum XPCContractError: Error, Equatable, Sendable, LocalizedError {
     case tooManyMetrics
     case pageLimitExceeded
     case invalidScope
+    case invalidDeletionRequest
+    case duplicateManagedOutputID
+    case deletionSelectionLimitExceeded
 
     public var errorDescription: String? {
         switch self {
@@ -166,6 +227,12 @@ public enum XPCContractError: Error, Equatable, Sendable, LocalizedError {
             "The request exceeds the fixed response page limit."
         case .invalidScope:
             "The request scope is invalid."
+        case .invalidDeletionRequest:
+            "The deletion request must use either preview with an explicit scope or confirmation with an agent-issued nonce."
+        case .duplicateManagedOutputID:
+            "The deletion request includes the same managed output more than once."
+        case .deletionSelectionLimitExceeded:
+            "The deletion request selects too many managed outputs."
         }
     }
 }
@@ -174,6 +241,7 @@ public enum XPCContractValidator {
     public static let maximumSummaryMetrics = 50
     public static let maximumQueryDays = 366
     public static let maximumEvidenceRecords = 200
+    public static let maximumDeletionManagedOutputs = 100
 
     public static func validate(_ envelope: XPCRequestEnvelope) throws {
         guard envelope.apiVersion.major == APIVersion.v1.major else {
@@ -224,6 +292,48 @@ public enum XPCContractValidator {
         }
         guard query.repositoryID?.isEmpty != true, query.workUnitID?.isEmpty != true else {
             throw XPCContractError.invalidScope
+        }
+    }
+
+    public static func validate(_ scope: XPCDeletionScope) throws {
+        guard scope.eventScope != nil || !scope.managedOutputIDs.isEmpty else {
+            throw XPCContractError.invalidDeletionRequest
+        }
+        guard Set(scope.managedOutputIDs).count == scope.managedOutputIDs.count else {
+            throw XPCContractError.duplicateManagedOutputID
+        }
+        guard scope.managedOutputIDs.count <= maximumDeletionManagedOutputs else {
+            throw XPCContractError.deletionSelectionLimitExceeded
+        }
+        if let eventScope = scope.eventScope {
+            guard
+                eventScope.to >= eventScope.from,
+                eventScope.to.timeIntervalSince(eventScope.from) <= Double(maximumQueryDays * 86_400),
+                eventScope.repositoryID?.isEmpty != true,
+                eventScope.workUnitID?.isEmpty != true
+            else {
+                throw XPCContractError.invalidDeletionRequest
+            }
+        }
+    }
+
+    public static func validate(_ request: XPCDeletionRequest) throws {
+        try validate(request.envelope)
+        guard request.envelope.kind == .requestDeletion,
+              request.envelope.capability == .destructiveDelete
+        else {
+            throw XPCContractError.capabilityDoesNotPermitKind
+        }
+        switch request.phase {
+        case .preview:
+            guard let scope = request.scope, request.confirmationNonce == nil else {
+                throw XPCContractError.invalidDeletionRequest
+            }
+            try validate(scope)
+        case .confirm:
+            guard request.scope == nil, request.confirmationNonce != nil else {
+                throw XPCContractError.invalidDeletionRequest
+            }
         }
     }
 }
@@ -390,6 +500,63 @@ public struct XPCCollectionStateResponse: Codable, Equatable, Sendable {
 
     public init(globallyPaused: Bool) {
         self.globallyPaused = globallyPaused
+    }
+}
+
+public struct XPCManagedOutputItem: Codable, Equatable, Sendable, Identifiable {
+    public let id: UUID
+    public let kind: String
+    public let filename: String
+    public let byteCount: Int64
+    public let createdAt: Date
+
+    public init(id: UUID, kind: String, filename: String, byteCount: Int64, createdAt: Date) {
+        self.id = id
+        self.kind = kind
+        self.filename = filename
+        self.byteCount = byteCount
+        self.createdAt = createdAt
+    }
+}
+
+public struct XPCDeletionPreviewResponse: Codable, Equatable, Sendable {
+    public let confirmationNonce: UUID
+    public let expiresAt: Date
+    public let matchingEventCount: Int
+    public let managedOutputs: [XPCManagedOutputItem]
+
+    public init(
+        confirmationNonce: UUID,
+        expiresAt: Date,
+        matchingEventCount: Int,
+        managedOutputs: [XPCManagedOutputItem]
+    ) {
+        self.confirmationNonce = confirmationNonce
+        self.expiresAt = expiresAt
+        self.matchingEventCount = matchingEventCount
+        self.managedOutputs = managedOutputs
+    }
+}
+
+public struct XPCDeletionReceiptResponse: Codable, Equatable, Sendable {
+    public let receiptID: UUID
+    public let deletedEventCount: Int
+    public let deletedManagedOutputCount: Int
+    public let missingManagedOutputCount: Int
+    public let createdAt: Date
+
+    public init(
+        receiptID: UUID,
+        deletedEventCount: Int,
+        deletedManagedOutputCount: Int,
+        missingManagedOutputCount: Int,
+        createdAt: Date
+    ) {
+        self.receiptID = receiptID
+        self.deletedEventCount = deletedEventCount
+        self.deletedManagedOutputCount = deletedManagedOutputCount
+        self.missingManagedOutputCount = missingManagedOutputCount
+        self.createdAt = createdAt
     }
 }
 

@@ -11,6 +11,8 @@ public enum WWMDAgentError: Error, Equatable, Sendable, LocalizedError {
     case adapterDisabled
     case checkpointScopeMismatch
     case queryResultLimitExceeded(maximum: Int)
+    case deletionPreviewNotFound
+    case deletionPreviewExpired
 
     public var errorDescription: String? {
         switch self {
@@ -24,15 +26,27 @@ public enum WWMDAgentError: Error, Equatable, Sendable, LocalizedError {
             "The source checkpoint does not match the explicit adapter configuration."
         case .queryResultLimitExceeded(let maximum):
             "The requested query has more than \(maximum) matching events. Narrow the explicit time or metadata scope."
+        case .deletionPreviewNotFound:
+            "The deletion confirmation nonce is not available. Request a new preview before confirming."
+        case .deletionPreviewExpired:
+            "The deletion preview expired. Request a new preview before confirming."
         }
     }
 }
 
 public actor WWMDAgentRuntime {
     public static let maximumSummaryEvents = 500
+    public static let deletionPreviewLifetime: TimeInterval = 60
 
     private let store: TelemetryStore
     private let identity: LocalIdentity
+    private var pendingDeletions: [UUID: PendingDeletion] = [:]
+
+    private struct PendingDeletion: Sendable {
+        let selection: DeletionSelection
+        let latestSequence: Int64
+        let expiresAt: Date
+    }
 
     public init(store: TelemetryStore, identity: LocalIdentity) {
         self.store = store
@@ -54,6 +68,67 @@ public actor WWMDAgentRuntime {
     public func setCollectionState(_ paused: Bool) async throws -> XPCCollectionStateResponse {
         try await store.setGlobalPause(paused)
         return XPCCollectionStateResponse(globallyPaused: try await store.collectionState().globallyPaused)
+    }
+
+    /// Produces a short-lived, agent-owned confirmation nonce. The request
+    /// cannot carry filesystem paths; it may select only registered output IDs.
+    public func previewDeletion(
+        scope: XPCDeletionScope,
+        now: Date = Date()
+    ) async throws -> XPCDeletionPreviewResponse {
+        try XPCContractValidator.validate(scope)
+        discardExpiredDeletionPreviews(now: now)
+        let selection = deletionSelection(from: scope)
+        let preview = try await store.previewDeletion(selection: selection)
+        let nonce = UUID()
+        let expiresAt = now.addingTimeInterval(Self.deletionPreviewLifetime)
+        pendingDeletions[nonce] = PendingDeletion(
+            selection: selection,
+            latestSequence: preview.latestSequence,
+            expiresAt: expiresAt
+        )
+        return XPCDeletionPreviewResponse(
+            confirmationNonce: nonce,
+            expiresAt: expiresAt,
+            matchingEventCount: preview.matchingEventCount,
+            managedOutputs: preview.managedOutputs.map {
+                XPCManagedOutputItem(
+                    id: $0.id,
+                    kind: $0.kind.rawValue,
+                    filename: $0.filename,
+                    byteCount: $0.byteCount,
+                    createdAt: $0.createdAt
+                )
+            }
+        )
+    }
+
+    /// Confirmation consumes its nonce before storage mutation. A failed or
+    /// stale confirmation therefore requires a newly reviewed preview.
+    public func confirmDeletion(
+        nonce: UUID,
+        now: Date = Date()
+    ) async throws -> XPCDeletionReceiptResponse {
+        guard let pending = pendingDeletions.removeValue(forKey: nonce) else {
+            throw WWMDAgentError.deletionPreviewNotFound
+        }
+        guard pending.expiresAt > now else {
+            throw WWMDAgentError.deletionPreviewExpired
+        }
+        discardExpiredDeletionPreviews(now: now)
+        let receipt = try await store.performDeletion(
+            selection: pending.selection,
+            expectedLatestSequence: pending.latestSequence,
+            scopeDigest: deletionScopeDigest(for: pending.selection),
+            at: now
+        )
+        return XPCDeletionReceiptResponse(
+            receiptID: receipt.receiptID,
+            deletedEventCount: receipt.deletedEventCount,
+            deletedManagedOutputCount: receipt.deletedManagedOutputCount,
+            missingManagedOutputCount: receipt.missingManagedOutputCount,
+            createdAt: receipt.createdAt
+        )
     }
 
     public func setAdapterEnabled(
@@ -288,6 +363,40 @@ public actor WWMDAgentRuntime {
             throw WWMDAgentError.queryResultLimitExceeded(maximum: maximum)
         }
         return try await store.events(matching: query)
+    }
+
+    private func deletionSelection(from scope: XPCDeletionScope) -> DeletionSelection {
+        DeletionSelection(
+            eventScope: scope.eventScope.map {
+                EventDeletionScope(
+                    from: $0.from,
+                    to: $0.to,
+                    repositoryID: $0.repositoryID,
+                    workUnitID: $0.workUnitID,
+                    includeUserSensitiveEvents: $0.includeUserSensitiveEvents
+                )
+            },
+            managedOutputIDs: scope.managedOutputIDs
+        )
+    }
+
+    private func discardExpiredDeletionPreviews(now: Date) {
+        pendingDeletions = pendingDeletions.filter { _, preview in
+            preview.expiresAt > now
+        }
+    }
+
+    private func deletionScopeDigest(for selection: DeletionSelection) -> String {
+        var components = ["wwmd.deletion.v1"]
+        if let scope = selection.eventScope {
+            components.append("from=\(scope.from.timeIntervalSince1970)")
+            components.append("to=\(scope.to.timeIntervalSince1970)")
+            components.append("repository=\(scope.repositoryID ?? "")")
+            components.append("work_unit=\(scope.workUnitID ?? "")")
+            components.append("user_sensitive=\(scope.includeUserSensitiveEvents)")
+        }
+        components.append(contentsOf: selection.managedOutputIDs.map(\.uuidString).sorted())
+        return StableHash.sha256(components.joined(separator: "|"))
     }
 
     private func assertCollectionPermitted(

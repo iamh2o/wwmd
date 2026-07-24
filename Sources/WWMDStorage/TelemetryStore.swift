@@ -13,6 +13,12 @@ public enum TelemetryStoreError: Error, Equatable, Sendable, LocalizedError {
     case destinationAlreadyExists
     case fileOperationFailed
     case backupFailed(code: Int32)
+    case invalidDeletionScope
+    case duplicateManagedOutputID
+    case managedOutputNotFound
+    case deletionPreviewStale
+    case deletionSelectionTooLarge
+    case managedOutputChanged
 
     public var errorDescription: String? {
         switch self {
@@ -34,6 +40,18 @@ public enum TelemetryStoreError: Error, Equatable, Sendable, LocalizedError {
             "WWMD could not complete the requested local file operation."
         case .backupFailed(let code):
             "WWMD SQLite backup failed (SQLite code \(code))."
+        case .invalidDeletionScope:
+            "WWMD deletion requires an explicit bounded event scope or exact managed output IDs."
+        case .duplicateManagedOutputID:
+            "WWMD deletion cannot include the same managed output more than once."
+        case .managedOutputNotFound:
+            "One or more selected managed outputs no longer have a WWMD receipt."
+        case .deletionPreviewStale:
+            "WWMD data changed after the deletion preview. Request a new preview before confirming."
+        case .deletionSelectionTooLarge:
+            "WWMD deletion selects too many managed outputs in one request."
+        case .managedOutputChanged:
+            "A managed output no longer matches its WWMD checksum and will not be deleted automatically."
         }
     }
 }
@@ -158,8 +176,109 @@ public struct BackupReceipt: Sendable, Equatable {
     }
 }
 
+public enum ManagedOutputKind: String, Sendable, Equatable {
+    case export
+    case backup
+}
+
+/// A safe view of a WWMD-generated output. The on-disk path remains storage
+/// private and is never returned through XPC or exported as telemetry.
+public struct ManagedOutput: Sendable, Equatable, Identifiable {
+    public let id: UUID
+    public let kind: ManagedOutputKind
+    public let filename: String
+    public let byteCount: Int64
+    public let checksum: String
+    public let createdAt: Date
+
+    public init(
+        id: UUID,
+        kind: ManagedOutputKind,
+        filename: String,
+        byteCount: Int64,
+        checksum: String,
+        createdAt: Date
+    ) {
+        self.id = id
+        self.kind = kind
+        self.filename = filename
+        self.byteCount = byteCount
+        self.checksum = checksum
+        self.createdAt = createdAt
+    }
+}
+
+/// Event deletion is intentionally bounded and explicit. A nil repository or
+/// work-unit field broadens only that one already time-bounded dimension.
+public struct EventDeletionScope: Sendable, Equatable {
+    public let from: Date
+    public let to: Date
+    public let repositoryID: String?
+    public let workUnitID: String?
+    public let includeUserSensitiveEvents: Bool
+
+    public init(
+        from: Date,
+        to: Date,
+        repositoryID: String? = nil,
+        workUnitID: String? = nil,
+        includeUserSensitiveEvents: Bool
+    ) {
+        self.from = from
+        self.to = to
+        self.repositoryID = repositoryID
+        self.workUnitID = workUnitID
+        self.includeUserSensitiveEvents = includeUserSensitiveEvents
+    }
+}
+
+public struct DeletionSelection: Sendable, Equatable {
+    public let eventScope: EventDeletionScope?
+    public let managedOutputIDs: [UUID]
+
+    public init(eventScope: EventDeletionScope?, managedOutputIDs: [UUID]) {
+        self.eventScope = eventScope
+        self.managedOutputIDs = managedOutputIDs
+    }
+}
+
+public struct DeletionPreview: Sendable, Equatable {
+    public let latestSequence: Int64
+    public let matchingEventCount: Int
+    public let managedOutputs: [ManagedOutput]
+
+    public init(latestSequence: Int64, matchingEventCount: Int, managedOutputs: [ManagedOutput]) {
+        self.latestSequence = latestSequence
+        self.matchingEventCount = matchingEventCount
+        self.managedOutputs = managedOutputs
+    }
+}
+
+public struct DeletionReceipt: Sendable, Equatable {
+    public let receiptID: UUID
+    public let deletedEventCount: Int
+    public let deletedManagedOutputCount: Int
+    public let missingManagedOutputCount: Int
+    public let createdAt: Date
+
+    public init(
+        receiptID: UUID,
+        deletedEventCount: Int,
+        deletedManagedOutputCount: Int,
+        missingManagedOutputCount: Int,
+        createdAt: Date
+    ) {
+        self.receiptID = receiptID
+        self.deletedEventCount = deletedEventCount
+        self.deletedManagedOutputCount = deletedManagedOutputCount
+        self.missingManagedOutputCount = missingManagedOutputCount
+        self.createdAt = createdAt
+    }
+}
+
 public actor TelemetryStore {
-    public static let latestSchemaVersion = 3
+    public static let latestSchemaVersion = 4
+    public static let maximumManagedOutputsPerDeletion = 100
 
     private let connection: SQLiteConnection
     private let encoder: JSONEncoder
@@ -514,12 +633,106 @@ public actor TelemetryStore {
                 throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
             }
             let deleted = Int(sqlite3_changes(connection.db))
+            if deleted > 0 {
+                try invalidateDerivedState()
+            }
             try connection.commit()
             return PurgeReceipt(
                 deletedEventCount: deleted,
                 occurredBefore: occurredBefore,
                 includedUserSensitiveEvents: includeUserSensitiveEvents
             )
+        } catch {
+            connection.rollback()
+            throw error
+        }
+    }
+
+    /// Returns only metadata about files WWMD itself generated and registered.
+    /// The storage-private absolute path is never exposed by this API.
+    public func managedOutputs() throws -> [ManagedOutput] {
+        try allManagedOutputRecords().map(\.output)
+    }
+
+    /// Previews an exact deletion selection. The returned ledger sequence must
+    /// match at confirmation, preventing a stale preview from deleting newly
+    /// ingested data.
+    public func previewDeletion(selection: DeletionSelection) throws -> DeletionPreview {
+        try validateDeletionSelection(selection)
+        let managedOutputRecords = try managedOutputRecords(ids: selection.managedOutputIDs)
+        let matchingEventCount: Int
+        if let eventScope = selection.eventScope {
+            matchingEventCount = try eventCount(matchingDeletionScope: eventScope)
+        } else {
+            matchingEventCount = 0
+        }
+        return DeletionPreview(
+            latestSequence: try latestEventSequence(),
+            matchingEventCount: matchingEventCount,
+            managedOutputs: managedOutputRecords.map(\.output)
+        )
+    }
+
+    /// Deletes only the previously previewed scope and registered managed
+    /// outputs. The file-system portion is deliberately limited to paths that
+    /// this store registered while producing an export or backup.
+    public func performDeletion(
+        selection: DeletionSelection,
+        expectedLatestSequence: Int64,
+        scopeDigest: String,
+        at date: Date = Date()
+    ) throws -> DeletionReceipt {
+        try validateDeletionSelection(selection)
+        guard !scopeDigest.isEmpty else {
+            throw TelemetryStoreError.invalidDeletionScope
+        }
+        let managedOutputRecords = try managedOutputRecords(ids: selection.managedOutputIDs)
+
+        try connection.beginImmediate()
+        do {
+            guard try latestEventSequence() == expectedLatestSequence else {
+                throw TelemetryStoreError.deletionPreviewStale
+            }
+
+            var deletedManagedOutputCount = 0
+            var missingManagedOutputCount = 0
+            for record in managedOutputRecords {
+                var isDirectory: ObjCBool = false
+                if FileManager.default.fileExists(atPath: record.absolutePath, isDirectory: &isDirectory) {
+                    guard !isDirectory.boolValue else {
+                        throw TelemetryStoreError.fileOperationFailed
+                    }
+                    guard try Self.fileChecksum(at: URL(fileURLWithPath: record.absolutePath)) == record.output.checksum else {
+                        throw TelemetryStoreError.managedOutputChanged
+                    }
+                    try FileManager.default.removeItem(atPath: record.absolutePath)
+                    deletedManagedOutputCount += 1
+                } else {
+                    missingManagedOutputCount += 1
+                }
+            }
+
+            let deletedEventCount: Int
+            if let eventScope = selection.eventScope {
+                deletedEventCount = try deleteEvents(matchingDeletionScope: eventScope)
+                if deletedEventCount > 0 {
+                    try invalidateDerivedState()
+                }
+            } else {
+                deletedEventCount = 0
+            }
+
+            try deleteManagedOutputRecords(ids: selection.managedOutputIDs)
+            let receipt = DeletionReceipt(
+                receiptID: UUID(),
+                deletedEventCount: deletedEventCount,
+                deletedManagedOutputCount: deletedManagedOutputCount,
+                missingManagedOutputCount: missingManagedOutputCount,
+                createdAt: date
+            )
+            try record(deletionReceipt: receipt, scopeDigest: scopeDigest)
+            try connection.commit()
+            return receipt
         } catch {
             connection.rollback()
             throw error
@@ -580,6 +793,7 @@ public actor TelemetryStore {
             }
             try handle.close()
 
+            let createdAt = Date()
             let receipt = ExportReceipt(
                 exportID: UUID(),
                 format: format,
@@ -587,7 +801,22 @@ public actor TelemetryStore {
                 eventCount: count,
                 checksum: try Self.fileChecksum(at: url)
             )
-            try record(receipt: receipt)
+            let managedOutput = try makeManagedOutputRecord(
+                id: receipt.exportID,
+                kind: .export,
+                url: url,
+                checksum: receipt.checksum,
+                createdAt: createdAt
+            )
+            try connection.beginImmediate()
+            do {
+                try record(receipt: receipt, at: createdAt)
+                try record(managedOutput: managedOutput)
+                try connection.commit()
+            } catch {
+                connection.rollback()
+                throw error
+            }
             return receipt
         } catch {
             try? FileManager.default.removeItem(at: url)
@@ -610,17 +839,38 @@ public actor TelemetryStore {
         }
         defer { sqlite3_close(destination) }
 
-        guard let backup = sqlite3_backup_init(destination, "main", connection.db, "main") else {
-            throw TelemetryStoreError.backupFailed(code: sqlite3_errcode(destination))
+        do {
+            guard let backup = sqlite3_backup_init(destination, "main", connection.db, "main") else {
+                throw TelemetryStoreError.backupFailed(code: sqlite3_errcode(destination))
+            }
+            let stepCode = sqlite3_backup_step(backup, -1)
+            let finishCode = sqlite3_backup_finish(backup)
+            guard stepCode == SQLITE_DONE, finishCode == SQLITE_OK else {
+                throw TelemetryStoreError.backupFailed(code: stepCode == SQLITE_DONE ? finishCode : stepCode)
+            }
+            let createdAt = Date()
+            let receipt = BackupReceipt(backupID: UUID(), checksum: try Self.fileChecksum(at: url))
+            let managedOutput = try makeManagedOutputRecord(
+                id: receipt.backupID,
+                kind: .backup,
+                url: url,
+                checksum: receipt.checksum,
+                createdAt: createdAt
+            )
+            try connection.beginImmediate()
+            do {
+                try record(receipt: receipt, at: createdAt)
+                try record(managedOutput: managedOutput)
+                try connection.commit()
+            } catch {
+                connection.rollback()
+                throw error
+            }
+            return receipt
+        } catch {
+            try? FileManager.default.removeItem(at: url)
+            throw error
         }
-        let stepCode = sqlite3_backup_step(backup, -1)
-        let finishCode = sqlite3_backup_finish(backup)
-        guard stepCode == SQLITE_DONE, finishCode == SQLITE_OK else {
-            throw TelemetryStoreError.backupFailed(code: stepCode == SQLITE_DONE ? finishCode : stepCode)
-        }
-        let receipt = BackupReceipt(backupID: UUID(), checksum: try Self.fileChecksum(at: url))
-        try record(receipt: receipt)
-        return receipt
     }
 
     /// Call only after the agent has stopped and released its SQLite connection.
@@ -641,6 +891,248 @@ public actor TelemetryStore {
 
     public func rebuildableEventCount() throws -> Int {
         try scalarInt("SELECT COUNT(*) FROM telemetry_events;")
+    }
+
+    private struct ManagedOutputRecord {
+        let output: ManagedOutput
+        let absolutePath: String
+    }
+
+    private func validateDeletionSelection(_ selection: DeletionSelection) throws {
+        guard selection.eventScope != nil || !selection.managedOutputIDs.isEmpty else {
+            throw TelemetryStoreError.invalidDeletionScope
+        }
+        guard Set(selection.managedOutputIDs).count == selection.managedOutputIDs.count else {
+            throw TelemetryStoreError.duplicateManagedOutputID
+        }
+        guard selection.managedOutputIDs.count <= Self.maximumManagedOutputsPerDeletion else {
+            throw TelemetryStoreError.deletionSelectionTooLarge
+        }
+        if let scope = selection.eventScope {
+            guard
+                scope.to >= scope.from,
+                scope.to.timeIntervalSince(scope.from) <= Double(366 * 86_400),
+                scope.repositoryID?.isEmpty != true,
+                scope.workUnitID?.isEmpty != true
+            else {
+                throw TelemetryStoreError.invalidDeletionScope
+            }
+        }
+    }
+
+    private func latestEventSequence() throws -> Int64 {
+        let statement = try connection.prepare("SELECT COALESCE(MAX(sequence), 0) FROM telemetry_events;")
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+        }
+        return sqlite3_column_int64(statement, 0)
+    }
+
+    private func eventCount(matchingDeletionScope scope: EventDeletionScope) throws -> Int {
+        let statement = try connection.prepare(
+            "SELECT COUNT(*) FROM telemetry_events WHERE \(deletionPredicate(for: scope));"
+        )
+        defer { sqlite3_finalize(statement) }
+        _ = try bind(scope, to: statement, startingAt: 1)
+        guard sqlite3_step(statement) == SQLITE_ROW else {
+            throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+        }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    private func deleteEvents(matchingDeletionScope scope: EventDeletionScope) throws -> Int {
+        let predicate = deletionPredicate(for: scope)
+        let associationStatement = try connection.prepare(
+            "DELETE FROM associations WHERE event_id IN (SELECT event_id FROM telemetry_events WHERE \(predicate));"
+        )
+        defer { sqlite3_finalize(associationStatement) }
+        _ = try bind(scope, to: associationStatement, startingAt: 1)
+        guard sqlite3_step(associationStatement) == SQLITE_DONE else {
+            throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+        }
+
+        let eventStatement = try connection.prepare(
+            "DELETE FROM telemetry_events WHERE \(predicate);"
+        )
+        defer { sqlite3_finalize(eventStatement) }
+        _ = try bind(scope, to: eventStatement, startingAt: 1)
+        guard sqlite3_step(eventStatement) == SQLITE_DONE else {
+            throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+        }
+        return Int(sqlite3_changes(connection.db))
+    }
+
+    private func invalidateDerivedState() throws {
+        try connection.execute(
+            """
+            DELETE FROM associations;
+            DELETE FROM work_units;
+            DELETE FROM metric_windows;
+            DELETE FROM recommendations;
+            DELETE FROM projection_checkpoints;
+            """
+        )
+    }
+
+    private func deletionPredicate(for scope: EventDeletionScope) -> String {
+        var predicates = [
+            "occurred_at IS NOT NULL",
+            "occurred_at >= ?",
+            "occurred_at <= ?"
+        ]
+        if !scope.includeUserSensitiveEvents {
+            predicates.append("sensitivity != 'user_sensitive'")
+        }
+        if scope.repositoryID != nil {
+            predicates.append("repository_id = ?")
+        }
+        if scope.workUnitID != nil {
+            predicates.append("work_unit_id = ?")
+        }
+        return predicates.joined(separator: " AND ")
+    }
+
+    @discardableResult
+    private func bind(
+        _ scope: EventDeletionScope,
+        to statement: OpaquePointer?,
+        startingAt index: Int32
+    ) throws -> Int32 {
+        var nextIndex = index
+        try connection.bind(scope.from.timeIntervalSince1970, to: statement, at: nextIndex)
+        nextIndex += 1
+        try connection.bind(scope.to.timeIntervalSince1970, to: statement, at: nextIndex)
+        nextIndex += 1
+        if let repositoryID = scope.repositoryID {
+            try connection.bind(repositoryID, to: statement, at: nextIndex)
+            nextIndex += 1
+        }
+        if let workUnitID = scope.workUnitID {
+            try connection.bind(workUnitID, to: statement, at: nextIndex)
+            nextIndex += 1
+        }
+        return nextIndex
+    }
+
+    private func allManagedOutputRecords() throws -> [ManagedOutputRecord] {
+        let statement = try connection.prepare(
+            """
+            SELECT output_id, output_kind, absolute_path, filename, byte_count,
+                   manifest_checksum, created_at
+            FROM managed_outputs
+            ORDER BY created_at ASC, output_id ASC;
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        var records: [ManagedOutputRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            records.append(try decodeManagedOutputRecord(statement))
+        }
+        let code = sqlite3_errcode(connection.db)
+        if code != SQLITE_OK && code != SQLITE_ROW && code != SQLITE_DONE {
+            throw TelemetryStoreError.sqliteFailed(code: code)
+        }
+        return records
+    }
+
+    private func managedOutputRecords(ids: [UUID]) throws -> [ManagedOutputRecord] {
+        guard !ids.isEmpty else { return [] }
+        var records: [ManagedOutputRecord] = []
+        for id in ids {
+            let statement = try connection.prepare(
+                """
+                SELECT output_id, output_kind, absolute_path, filename, byte_count,
+                       manifest_checksum, created_at
+                FROM managed_outputs
+                WHERE output_id = ?;
+                """
+            )
+            defer { sqlite3_finalize(statement) }
+            try connection.bind(id.uuidString, to: statement, at: 1)
+            guard sqlite3_step(statement) == SQLITE_ROW else {
+                throw TelemetryStoreError.managedOutputNotFound
+            }
+            records.append(try decodeManagedOutputRecord(statement))
+        }
+        return records
+    }
+
+    private func decodeManagedOutputRecord(_ statement: OpaquePointer?) throws -> ManagedOutputRecord {
+        guard
+            let idText = connection.columnText(statement, at: 0),
+            let id = UUID(uuidString: idText),
+            let kindText = connection.columnText(statement, at: 1),
+            let kind = ManagedOutputKind(rawValue: kindText),
+            let absolutePath = connection.columnText(statement, at: 2),
+            let filename = connection.columnText(statement, at: 3),
+            let checksum = connection.columnText(statement, at: 5)
+        else {
+            throw TelemetryStoreError.decodingFailed
+        }
+        let output = ManagedOutput(
+            id: id,
+            kind: kind,
+            filename: filename,
+            byteCount: sqlite3_column_int64(statement, 4),
+            checksum: checksum,
+            createdAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 6))
+        )
+        return ManagedOutputRecord(output: output, absolutePath: absolutePath)
+    }
+
+    private func makeManagedOutputRecord(
+        id: UUID,
+        kind: ManagedOutputKind,
+        url: URL,
+        checksum: String,
+        createdAt: Date
+    ) throws -> ManagedOutputRecord {
+        let standardizedURL = url.standardizedFileURL
+        guard standardizedURL.isFileURL, standardizedURL.path.hasPrefix("/") else {
+            throw TelemetryStoreError.fileOperationFailed
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: standardizedURL.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              !standardizedURL.lastPathComponent.isEmpty
+        else {
+            throw TelemetryStoreError.fileOperationFailed
+        }
+        let attributes = try FileManager.default.attributesOfItem(atPath: standardizedURL.path)
+        guard let byteCount = (attributes[.size] as? NSNumber)?.int64Value else {
+            throw TelemetryStoreError.fileOperationFailed
+        }
+        let output = ManagedOutput(
+            id: id,
+            kind: kind,
+            filename: standardizedURL.lastPathComponent,
+            byteCount: byteCount,
+            checksum: checksum,
+            createdAt: createdAt
+        )
+        return ManagedOutputRecord(output: output, absolutePath: standardizedURL.path)
+    }
+
+    private func deleteManagedOutputRecords(ids: [UUID]) throws {
+        guard !ids.isEmpty else { return }
+        let statement = try connection.prepare("DELETE FROM managed_outputs WHERE output_id = ?;")
+        defer { sqlite3_finalize(statement) }
+        for id in ids {
+            try connection.bind(id.uuidString, to: statement, at: 1)
+            guard sqlite3_step(statement) == SQLITE_DONE else {
+                throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+            }
+            guard sqlite3_changes(connection.db) == 1 else {
+                throw TelemetryStoreError.managedOutputNotFound
+            }
+            guard sqlite3_reset(statement) == SQLITE_OK else {
+                throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+            }
+            guard sqlite3_clear_bindings(statement) == SQLITE_OK else {
+                throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+            }
+        }
     }
 
     private enum InsertResult {
@@ -1056,6 +1548,47 @@ public actor TelemetryStore {
                 throw error
             }
         }
+        if current < 4 {
+            try connection.beginImmediate()
+            do {
+                try connection.execute(
+                    """
+                    CREATE TABLE managed_outputs (
+                        output_id TEXT PRIMARY KEY,
+                        output_kind TEXT NOT NULL,
+                        absolute_path TEXT NOT NULL,
+                        filename TEXT NOT NULL,
+                        byte_count INTEGER NOT NULL,
+                        manifest_checksum TEXT NOT NULL,
+                        created_at REAL NOT NULL,
+                        UNIQUE(output_kind, absolute_path)
+                    );
+                    CREATE TABLE deletion_receipts (
+                        receipt_id TEXT PRIMARY KEY,
+                        scope_digest TEXT NOT NULL,
+                        deleted_event_count INTEGER NOT NULL,
+                        deleted_managed_output_count INTEGER NOT NULL,
+                        missing_managed_output_count INTEGER NOT NULL,
+                        created_at REAL NOT NULL
+                    );
+                    """
+                )
+                let migration = try connection.prepare(
+                    "INSERT INTO schema_migrations (version, checksum, applied_at) VALUES (?, ?, ?);"
+                )
+                defer { sqlite3_finalize(migration) }
+                try connection.bind(Int64(4), to: migration, at: 1)
+                try connection.bind(StableHash.sha256("wwmd-schema-v4-managed-deletion"), to: migration, at: 2)
+                try connection.bind(Date().timeIntervalSince1970, to: migration, at: 3)
+                guard sqlite3_step(migration) == SQLITE_DONE else {
+                    throw TelemetryStoreError.migrationFailed(version: 4)
+                }
+                try connection.commit()
+            } catch {
+                connection.rollback()
+                throw error
+            }
+        }
     }
 
     private nonisolated static func migrationSchemaVersion(_ connection: SQLiteConnection) throws -> Int {
@@ -1089,7 +1622,7 @@ public actor TelemetryStore {
         return connection.columnText(statement, at: 0) == "ok"
     }
 
-    private func record(receipt: ExportReceipt) throws {
+    private func record(receipt: ExportReceipt, at date: Date) throws {
         let statement = try connection.prepare(
             """
             INSERT INTO export_receipts (
@@ -1102,13 +1635,13 @@ public actor TelemetryStore {
         try connection.bind(receipt.format.rawValue, to: statement, at: 2)
         try connection.bind(receipt.checksum, to: statement, at: 3)
         try connection.bind(receipt.profile.rawValue, to: statement, at: 4)
-        try connection.bind(Date().timeIntervalSince1970, to: statement, at: 5)
+        try connection.bind(date.timeIntervalSince1970, to: statement, at: 5)
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
         }
     }
 
-    private func record(receipt: BackupReceipt) throws {
+    private func record(receipt: BackupReceipt, at date: Date) throws {
         let statement = try connection.prepare(
             """
             INSERT INTO backup_receipts (backup_id, manifest_checksum, created_at)
@@ -1118,7 +1651,50 @@ public actor TelemetryStore {
         defer { sqlite3_finalize(statement) }
         try connection.bind(receipt.backupID.uuidString, to: statement, at: 1)
         try connection.bind(receipt.checksum, to: statement, at: 2)
-        try connection.bind(Date().timeIntervalSince1970, to: statement, at: 3)
+        try connection.bind(date.timeIntervalSince1970, to: statement, at: 3)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+        }
+    }
+
+    private func record(managedOutput record: ManagedOutputRecord) throws {
+        let statement = try connection.prepare(
+            """
+            INSERT INTO managed_outputs (
+                output_id, output_kind, absolute_path, filename, byte_count,
+                manifest_checksum, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try connection.bind(record.output.id.uuidString, to: statement, at: 1)
+        try connection.bind(record.output.kind.rawValue, to: statement, at: 2)
+        try connection.bind(record.absolutePath, to: statement, at: 3)
+        try connection.bind(record.output.filename, to: statement, at: 4)
+        try connection.bind(record.output.byteCount, to: statement, at: 5)
+        try connection.bind(record.output.checksum, to: statement, at: 6)
+        try connection.bind(record.output.createdAt.timeIntervalSince1970, to: statement, at: 7)
+        guard sqlite3_step(statement) == SQLITE_DONE else {
+            throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
+        }
+    }
+
+    private func record(deletionReceipt receipt: DeletionReceipt, scopeDigest: String) throws {
+        let statement = try connection.prepare(
+            """
+            INSERT INTO deletion_receipts (
+                receipt_id, scope_digest, deleted_event_count,
+                deleted_managed_output_count, missing_managed_output_count, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?);
+            """
+        )
+        defer { sqlite3_finalize(statement) }
+        try connection.bind(receipt.receiptID.uuidString, to: statement, at: 1)
+        try connection.bind(scopeDigest, to: statement, at: 2)
+        try connection.bind(Int64(receipt.deletedEventCount), to: statement, at: 3)
+        try connection.bind(Int64(receipt.deletedManagedOutputCount), to: statement, at: 4)
+        try connection.bind(Int64(receipt.missingManagedOutputCount), to: statement, at: 5)
+        try connection.bind(receipt.createdAt.timeIntervalSince1970, to: statement, at: 6)
         guard sqlite3_step(statement) == SQLITE_DONE else {
             throw TelemetryStoreError.sqliteFailed(code: sqlite3_errcode(connection.db))
         }

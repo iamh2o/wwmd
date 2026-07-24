@@ -34,8 +34,10 @@ validation, a single SQLite writer actor, an exact-contract CSV gate, an
 explicit-root Git reader, native XPC server/client code that requires explicit
 code-signing requirements, and a CLI that never opens the database. It does
 not yet have a release-configured/running XPC service, security-scoped source
-bookmarks/scheduling, managed deletion, or release-signing proof; those remain
-high-priority implementation gates.
+bookmarks/scheduling, a native deletion UI/full stopped-agent database-deletion
+operation, or release-signing proof; those remain high-priority implementation
+gates. The agent now has a bounded, two-phase deletion path for explicit event
+scopes and registered exports/backups.
 
 ## Scope and assumptions
 
@@ -85,8 +87,10 @@ foundation, not a claim of a complete release daemon.
   additionally requires the same effective user. A production requirement and
   signed launchd proof remain absent.
 - Agent -> export destination: safe NDJSON/CSV summary and SQLite backup are
-  implemented for an explicit path, with checksummed receipts. Bookmark-backed
-  managed paths and end-to-end deletion are not yet present.
+  implemented for an explicit path, with checksummed receipts. The agent may
+  delete only registered output IDs through a preview/confirmation nonce; it
+  rechecks the recorded checksum before removal. Bookmark-backed path authority,
+  native selection UI, and stopped-agent database/WAL/SHM deletion are pending.
 
 #### Diagram
 
@@ -188,7 +192,7 @@ flowchart TD
 | TM-002 | Malformed CSV | User selects a file after contract is supplied. | Exhaust parser or inject bad metadata. | Availability/integrity/privacy. | Agent, ledger, telemetry. | Exact header contract requires non-empty matching headers. | No streaming parser/row cap yet. | Stream with row/byte/batch caps, typed conversion, quarantine digest only, fuzz parser. | Adapter health, rejected row count, bounded queue depth. | Medium | Medium | medium |
 | TM-003 | Selected repo metadata | Git adapter is enabled for an explicit configuration. | Use symlink/move/repository shape to read beyond root. | Metadata disclosure. | Local paths/repository metadata. | Runtime checks opt-in before reading; Git reader resolves symlinks, requires exact root, invokes fixed Git arguments, and stores only hashed repo ID/aggregates. | Bookmark scope and scheduling/rotation handling absent. | Validate security-scoped bookmark and canonical child paths; reject escapes. | Root digest/reason-code health event. | Medium | High | high |
 | TM-004 | Source or annotation input | Allowed payload field reaches Core. | Persist prompt/title/secret-shaped value. | Content/secret disclosure. | Telemetry/exports/diagnostics. | PrivacyGate rejects prohibited fragments, common secret prefixes, nested payloads, and free-text/non-opaque metadata identifiers in Sources/WWMDCore/TelemetryEvent.swift. | Pattern coverage and export/diagnostic filtering incomplete. | Keep closed descriptors; add regression corpus, redacted logs, export profile tests. | Quarantine counts only; no raw input logs. | Medium | High | high |
-| TM-005 | Same-user process/file mutation | Process can access local storage path. | Tamper ledger/WAL or managed output. | Incorrect evidence/data loss. | Ledger/projections/receipts. | SQLite transactions, integrity check, one writer actor, checksummed export/backup receipts in Sources/WWMDStorage/TelemetryStore.swift. | No at-rest cryptographic tamper proof or managed path provenance. | App Group permissions, integrity checks, verified managed backups, visible tamper state. | quick_check result, backup checksum mismatch. | Medium | Medium | medium |
+| TM-005 | Same-user process/file mutation | Process can access local storage path. | Tamper ledger/WAL or managed output. | Incorrect evidence/data loss. | Ledger/projections/receipts. | SQLite transactions, integrity check, one writer actor, checksummed export/backup receipts, and a checksum guard before managed-output removal in Sources/WWMDStorage/TelemetryStore.swift. | No at-rest cryptographic tamper proof or security-scoped path provenance. | App Group permissions, integrity checks, verified managed backups, visible tamper state. | quick_check result, backup checksum mismatch. | Medium | Medium | medium |
 | TM-006 | Local client/event flood | Adapter/XPC runtime exists. | Force expensive query/write/retry loops or fill disk. | Availability. | Agent, disk, responsiveness. | XPC range/metric/page caps, agent query result cap, actor writer, and opt-in-before-source execution. | Queue/disk quotas and scheduled retry limits are missing. | Enforce byte/record queues, disk reserve, cancellation, fixed query CPU budget. | Queue depth, disk class, rate-limited rejection counters. | Medium | Medium | medium |
 | TM-007 | Build/package substitution | Distribution pipeline/runtime exists. | Replace binary or misconfigure signing. | Agent boundary bypass. | Signing/XPC trust. | Static targets, no direct-DB CLI, explicit native code-signing requirements. | No release signing/notarization verification. | Pin release requirement, verify Team ID/entitlements in integration test, notarize. | Release artifact audit receipt. | Low | High | high |
 | TM-008 | Export/diagnostic action | Export is invoked. | Cause user-sensitive content to be emitted by default. | Data disclosure. | Annotations/metadata. | Safe export excludes user-sensitive events, records checksum/profile, and has regression tests. | No bookmark-backed managed path, preview, or secret-scan coverage. | Redaction profile, explicit annotation toggle, preview, manifest checksum, tests. | Export receipt/profile and secret-scan test evidence. | Medium | High | high |
@@ -231,5 +235,5 @@ This threat model is a foundation checkpoint, not a release sign-off. It covers
 all current runtime entrypoints, the planned source/XPC/export boundaries, and
 separates current code controls from design requirements. Security acceptance
 remains blocked on signed XPC peer verification, production packaging,
-security-scoped source selection/scheduling, managed deletion, and a
-release-build security test receipt.
+security-scoped source selection/scheduling, native deletion UI/full
+stopped-agent database deletion, and a release-build security test receipt.

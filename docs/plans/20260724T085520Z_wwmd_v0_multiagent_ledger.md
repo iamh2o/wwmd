@@ -49,9 +49,9 @@ changes predecessor historical activity databases.
 | G1-002 | Design | Write one root-authored implementation design | SUCCESS | feature_implementation | Gate 1 | root | docs/WWMD_AI_ENGINEERING_OBSERVABILITY_DESIGN.md, sections 1-41 | — | The document freezes one architecture and records source evidence, boundaries, schemas, privacy, reliability, and V0 scope. |
 | G1-003 | Design | Complete single-owner requirement consistency review | SUCCESS | contract_test | Gate 1 | root | Heading sweep confirms sections 1-41; Mermaid fence sweep; required-boundary sweep; post-implementation review below | — | Root reconciled terminology, ownership, schema, trust, scope, and unavailable data requirements without contradictions. |
 | FND-001 | Core | Versioned domain types, validation, provenance, redaction, and canonical event envelope | SUCCESS | feature_implementation | Gate 2 | root | Sources/WWMDCore/TelemetryEvent.swift; TelemetryEventTests (5 passing) | — | Closed event kinds, per-field provenance, bounded opaque identifiers, sensitivity, secret/content rejection, idempotency key, identity, and checkpoint contracts are implemented. |
-| FND-002 | Storage | Serialized SQLite ledger writer, idempotency, integrity, retention, and backup primitives | SUCCESS | feature_implementation | Gate 2 | root | TelemetryStore actor; persistence/migration/pause/export/backup/purge tests; swift test -> 34 passed | — | Single-writer ledger, idempotency, integrity, durable pause, scoped purge, and local backup primitive are implemented. |
-| MIG-001 | Storage | Atomic migrations and deterministic projection rebuild/checkpointing | SUCCESS | feature_implementation | Gate 2 | root | v1-to-latest fixture migration, projection checkpoint, deterministic ProjectionEngine rebuild; swift test -> 34 passed | Exact Date equality failed after SQLite REAL round trip; assertion was changed to semantic fields plus 1 ms timestamp tolerance | Atomic migration, projection checkpoint, and deterministic replay now pass full suite. |
-| IPC-001 | Process | Versioned native XPC contract and agent/app ownership boundary | IN_PROGRESS | feature_implementation | Gate 2 | root | NativeXPCServer/NativeXPCClient, same-user delegate check, typed health/summary/evidence/recommendation/pause dispatch, and XPC service tests; swift test -> 34 passed | Release Team ID/entitlement/Mach-service configuration is unavailable, so a signed cross-process proof cannot run | Native listener/client requires explicit code-signing requirements; safe query and pause RPCs are implemented and direct database CLI access is removed. |
+| FND-002 | Storage | Serialized SQLite ledger writer, idempotency, integrity, retention, and backup primitives | SUCCESS | feature_implementation | Gate 2 | root | TelemetryStore actor; persistence/migration/pause/export/backup/purge tests; swift test -> 43 passed | — | Single-writer ledger, idempotency, integrity, durable pause, scoped purge, and local backup primitive are implemented. |
+| MIG-001 | Storage | Atomic migrations and deterministic projection rebuild/checkpointing | SUCCESS | feature_implementation | Gate 2 | root | v1-to-v4 fixture migration, projection checkpoint, deterministic ProjectionEngine rebuild; swift test -> 43 passed | Exact Date equality failed after SQLite REAL round trip; assertion was changed to semantic fields plus 1 ms timestamp tolerance | Atomic migration, projection checkpoint, and deterministic replay now pass full suite. |
+| IPC-001 | Process | Versioned native XPC contract and agent/app ownership boundary | IN_PROGRESS | feature_implementation | Gate 2 | root | NativeXPCServer/NativeXPCClient, same-user delegate check, typed health/summary/evidence/recommendation/pause/deletion dispatch, and XPC service tests; swift test -> 43 passed | Release Team ID/entitlement/Mach-service configuration is unavailable, so a signed cross-process proof cannot run | Native listener/client requires explicit code-signing requirements; safe query, pause, and two-phase deletion RPCs are implemented and direct database CLI access is removed. |
 | ADP-CODEX-CSV | Collection | Exact Codex CSV importer | BLOCKED | active_product_contract | Gate 3 | root | G0-003 | No actual CSV schema is present | Hard-fail by contract; no generic or inferred mapping will be implemented. |
 | ADP-GIT | Collection | User-selected repository metadata adapter | IN_PROGRESS | feature_implementation | Gate 3 | root | Explicit-root GitMetadataReader, hashed repository ID, aggregate-only offer, atomic commit checkpoint, and opt-in-before-read test; swift test -> 34 passed | Security-scoped bookmark persistence and scheduled source lifecycle are not implemented | Selected exact root is canonicalized and must match Git toplevel; no discovery, path persistence, filename capture, or source content capture exists. |
 | ADP-ACTIVITY | Collection | Safe activity/session metadata adapter without title capture or idle inference | IN_PROGRESS | feature_implementation | Gate 3 | root | SafeActivityAdapter, agent recordSafeActivity entrypoint, and negative title/idle privacy test | A real user-approved activity notification source and UI consent flow are not implemented | Only caller-supplied state, app bundle ID, and optional repository ID can form an offer. |
@@ -60,11 +60,11 @@ changes predecessor historical activity databases.
 | COR-001 | Value | Deterministic association model with evidence, confidence, competitors, and correction | IN_PROGRESS | feature_implementation | Gate 4 | root | Sources/WWMDAnalytics/CorrelationAndRules.swift; clear-winner, user-correction override, and deterministic rebuild tests | Typed association projection persistence and native correction view remain unimplemented | Candidate/evidence/score/ambiguity foundation and ledger-derived user correction are implemented. |
 | MET-001 | Value | Computable measured/derived/estimated metric catalog and projections | IN_PROGRESS | feature_implementation | Gate 4 | root | MetricCalculator and ProjectionEngine; token/cache/context/thread/correlation formula and sample-floor tests | Price-table metrics and typed metric-window persistence remain unimplemented | Measured/derived availability semantics and explicit data-gap outcomes are implemented. |
 | REC-001 | Value | Versioned deterministic recommendations, controls, and audit trail | IN_PROGRESS | feature_implementation | Gate 4 | root | RecommendationEngine: data quality, context pressure, long thread, repeated validation; ledger-derived dismiss/snooze test | Native evidence view and persisted materialized recommendation state remain unimplemented | Versioned deterministic proposals, scope keys, and audit events drive active recommendations. |
-| EXP-001 | Value | Privacy-safe NDJSON, CSV-summary, and SQLite backup export | SUCCESS | feature_implementation | Gate 4 | root | TelemetryStore.export/backup; safe-profile, backup, and purge test; swift test -> 34 passed | — | Agent-owned safe NDJSON, CSV summary, consistent SQLite backup, checksummed receipts, and no-overwrite behavior are implemented. |
+| EXP-001 | Value | Privacy-safe NDJSON, CSV-summary, and SQLite backup export | SUCCESS | feature_implementation | Gate 4 | root | TelemetryStore.export/backup; safe-profile, backup, managed-output registry, and purge tests; swift test -> 43 passed | — | Agent-owned safe NDJSON, CSV summary, consistent SQLite backup, checksummed receipts, managed-output registration, and no-overwrite behavior are implemented. |
 | UX-001 | Native product | Collection health, pause, summaries, drill-down, and association correction views | IN_PROGRESS | feature_implementation | Gate 5 | root | Sources/WWMDApp/main.swift menu-bar/viewer scaffold; named `wwmd-main` Window and `Open WWMD` action use native `openWindow` | UI is not yet connected to signed agent XPC or real projected summaries | Visible development state/privacy boundary is implemented; the menu-bar action now explicitly opens the main viewer; functional views remain. |
-| CLI-001 | Native product | Read-only local query and export CLI | IN_PROGRESS | feature_implementation | Gate 5 | root | NativeXPCClient and `wwmd health/summary/evidence/recommendations` safe JSON commands; no direct DB access; swift test -> 34 passed | Signed service integration and XPC-mediated export are not wired to a production agent | Functional bounded read-only health/summary/evidence/recommendation surface is implemented behind authenticated XPC configuration. |
-| PRIV-001 | Privacy | Persistent consent/pause, inclusion/exclusion, retention, redaction, and provenance | IN_PROGRESS | feature_implementation | Gate 5 | root | Core PrivacyGate opaque-metadata/secret tests; Store collection/adapter state and scoped purge; runtime opt-in-before-read/run checks | Repository allowlist/bookmarks, end-to-end deletion UI, and source-adapter consent views are not complete | Persistent global pause, explicit adapter opt-in state, core redaction rejection, provenance, and retention primitive are implemented. |
-| DEL-001 | Privacy | Complete local deletion including WAL/SHM/backups/exports selected by user | OPEN | feature_implementation | Gate 5 | root | Planned deletion test | — | — |
+| CLI-001 | Native product | Read-only local query and export CLI | IN_PROGRESS | feature_implementation | Gate 5 | root | NativeXPCClient and `wwmd health/summary/evidence/recommendations` safe JSON commands; no direct DB access; swift test -> 43 passed | Signed service integration and XPC-mediated export are not wired to a production agent | Functional bounded read-only health/summary/evidence/recommendation surface is implemented behind authenticated XPC configuration. |
+| PRIV-001 | Privacy | Persistent consent/pause, inclusion/exclusion, retention, redaction, and provenance | IN_PROGRESS | feature_implementation | Gate 5 | root | Core PrivacyGate opaque-metadata/secret tests; Store collection/adapter state, scoped purge, checksum-guarded managed deletion; runtime opt-in-before-read/run checks | Repository allowlist/bookmarks, native deletion UI, and source-adapter consent views are not complete | Persistent global pause, explicit adapter opt-in state, core redaction rejection, provenance, retention primitive, and a bounded agent-mediated deletion path are implemented. |
+| DEL-001 | Privacy | Complete local deletion including WAL/SHM/backups/exports selected by user | IN_PROGRESS | feature_implementation | Gate 5 | root | Storage v4 managed-output/deletion-receipt tables; two-phase XPC deletion request; agent-owned 60-second nonce; stale/missing/changed output tests; swift test -> 43 passed | Complete database/WAL/SHM removal must run only after the agent stops, and signed native selection/confirmation UI is not configured | Explicit bounded event deletion and exact registered export/backup deletion are agent-owned, checksum-guarded, revision-bound, and receipt-backed. No raw path or default-all deletion is accepted. |
 | SEC-001 | Release proof | XPC peer trust, codesigning configuration, and injection resistance | OPEN | contract_test | Gate 6 | root | Planned signed-build/XPC tests | — | — |
 | REL-001 | Release proof | Crash, disk, clock, sleep/wake, adapter, and source rotation recovery proof | OPEN | contract_test | Gate 6 | root | Planned fault-injection tests | — | — |
 | PERF-001 | Release proof | 24-hour soak and measured idle CPU/RSS/backpressure evidence | OPEN | contract_test | Gate 6 | root | Planned benchmark receipt | — | — |
@@ -87,9 +87,48 @@ Before implementation begins, the root must verify that the design:
 
 ## Current status
 
-Working rows: 16 (11 IN_PROGRESS, 5 OPEN)
+Working rows: 16 (12 IN_PROGRESS, 4 OPEN)
 Terminal rows: 11 (9 SUCCESS, 2 BLOCKED)
-Objective complete: no. Foundation/export and bounded XPC query foundations are complete; collection lifecycle, signed runtime proof, functional app views, XPC export, deletion lifecycle, and release proof remain.
+Objective complete: no. Foundation/export, bounded XPC query, and managed deletion foundations are complete; collection lifecycle, signed runtime proof, functional app views, XPC export, full database deletion lifecycle, and release proof remain.
+
+## Active implementation slice: managed deletion
+
+This root-owned slice closes the code-ready portion of `DEL-001` without
+claiming a signed release configuration or external-source contract.
+
+| Boundary | Frozen responsibility |
+|---|---|
+| App / signed CLI | May request a preview or confirm an agent-issued deletion nonce; never opens the database or supplies a raw deletion path. |
+| Native XPC | Validates destructive capability and request shape. Preview and confirmation are separate calls. |
+| Agent runtime | Owns an in-memory, short-lived nonce, rejects stale previews, and maps safe XPC data to one storage request. |
+| TelemetryStore | Is the only database/file mutation owner. It deletes only outputs it previously registered and only events in an explicit bounded scope. |
+| Managed output registry | Records newly generated export/backup paths internally; XPC responses expose only output ID, kind, filename, size, and time. Existing legacy receipts without a registered path are not inferred into delete targets. |
+
+The request must name either an exact time-bounded event scope or exact managed
+output IDs. There is no wildcard/default-all operation. A confirmation is bound
+to the preview's ledger sequence and selected output set; any intervening change
+requires a new preview. Before a registered file is removed, its current
+checksum must still match the one recorded at creation; a changed file is left
+untouched and requires a new explicit user decision. WWMD can delete only
+still-managed files; user-moved or copied outputs remain outside its deletion
+boundary. Full database/WAL/SHM removal remains a separate stopped-agent
+operation and is not represented as an agent-side fallback.
+
+## Managed-deletion single-owner consistency review
+
+The root re-reviewed this slice after code, tests, README, design, and threat
+model updates. It is consistent with the supplied implementation brief as
+follows:
+
+| Review point | Result | Evidence / boundary |
+|---|---|---|
+| Terminology | PASS | A *managed output* is only an export or backup created and registered by `TelemetryStore`; it is not a user-supplied path or a source bookmark. A *deletion receipt* is an aggregate record, not a copied event or raw scope. |
+| Component ownership | PASS | App/signed CLI request; XPC validates; `WWMDAgentRuntime` owns nonce lifetime; `TelemetryStore` alone mutates SQLite and removes files. |
+| Process and trust boundary | PARTIAL | `destructive_delete` capability, typed request shape, same-user listener check, and explicit signing requirement exist. A release Team ID/entitlement/Mach-service proof is still unavailable, so `SEC-001` remains open. |
+| Schema and privacy | PASS | Schema v4 adds private `managed_outputs` paths plus aggregate `deletion_receipts`; paths/checksums do not cross XPC and receipts store no raw path, output ID, or deleted event. |
+| Scope and recovery | PASS | Requests require a bounded time scope and/or exact registered IDs, are capped at 100 outputs, have no wildcard/default-all behavior, bind confirmation to latest ledger sequence, consume the nonce, and reject changed outputs before removal. Missing outputs clear only their registry receipt. |
+| V0 boundary | PASS | No network listener, dynamic plugin, source discovery, predecessor data, prompt/content capture, or direct-database app/CLI access was added. |
+| Completion boundary | PARTIAL | Native deletion UI, security-scoped path authority, full stopped-agent DB/WAL/SHM removal flow, and release signing proof remain outside this implemented slice. |
 
 ## Root single-owner post-implementation consistency review
 
@@ -110,10 +149,10 @@ row; `BLOCKED` identifies a missing external contract or release configuration.
 | Persistent global pause and per-adapter opt-in | PARTIAL | Durable store/runtime enforcement and XPC pause control exist; native UI controls are not connected. |
 | Evidence-scored correlation, competing candidates, user correction, no causal claims | PARTIAL | Deterministic scoring and ledger-derived correction override exist; typed materialized projection/UI are pending. |
 | V0 data-quality, context-pressure, long-thread, and repeated-validation recommendations with controls | PARTIAL | Deterministic, evidence-gated rules plus ledger-derived dismiss/snooze exist; materialized state/evidence UI are pending. |
-| Redacted NDJSON/CSV/SQLite backup export; cost only with local effective-dated price source | PARTIAL | Safe exports/backups and receipts exist; XPC CLI export and selected managed paths are pending; cost remains unavailable without a supplied price table. |
-| Complete local deletion of DB/WAL/SHM/backups/exports | PARTIAL | Scoped event purge and stopped-agent DB/WAL/SHM helper exist; selected output tracking and end-to-end deletion UX are pending. |
+| Redacted NDJSON/CSV/SQLite backup export; cost only with local effective-dated price source | PARTIAL | Safe exports/backups, receipts, and registered-output deletion exist; XPC CLI export and native output selection remain pending; cost remains unavailable without a supplied price table. |
+| Complete local deletion of DB/WAL/SHM/backups/exports | PARTIAL | Scoped event deletion plus checksum-guarded registered export/backup deletion are previewed and confirmed through an agent-owned nonce; the stopped-agent DB/WAL/SHM operation and native deletion UI remain pending. |
 | XPC local-process threat resistance | PARTIAL | Explicit native client/server code-signing requirements and same-user server acceptance exist; Team ID/entitlements/signed cross-process proof are blocked. |
-| Crash/disk/clock/sleep/source-rotation recovery and idle/performance targets | PARTIAL | SQLite transactions, integrity check, bounded XPC queries, and baseline unit tests exist; fault-injection and 24-hour/CPU/RSS proof are open. |
+| Crash/disk/clock/sleep/source-rotation recovery and idle/performance targets | PARTIAL | SQLite transactions, integrity check, bounded XPC queries, and deletion stale/missing/changed-output guards exist; fault-injection and 24-hour/CPU/RSS proof are open. |
 | Final acceptance requires terminal ledger rows and objective completion | NOT MET | 16 implementation/release rows remain working; this ledger deliberately does not claim completion. |
 
 Result: no terminology, ownership, process-boundary, schema, trust-boundary, or

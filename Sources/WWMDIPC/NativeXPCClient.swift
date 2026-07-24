@@ -98,6 +98,38 @@ public struct NativeXPCClient {
         }
     }
 
+    public func previewDeletion(
+        _ scope: XPCDeletionScope,
+        timeout: TimeInterval = 5
+    ) throws -> XPCDeletionPreviewResponse {
+        try call(
+            request: XPCDeletionRequest(
+                envelope: XPCRequestEnvelope(kind: .requestDeletion, capability: .destructiveDelete),
+                phase: .preview,
+                scope: scope
+            ),
+            timeout: timeout
+        ) { proxy, data, reply in
+            proxy.requestDeletion(data, withReply: reply)
+        }
+    }
+
+    public func confirmDeletion(
+        nonce: UUID,
+        timeout: TimeInterval = 5
+    ) throws -> XPCDeletionReceiptResponse {
+        try call(
+            request: XPCDeletionRequest(
+                envelope: XPCRequestEnvelope(kind: .requestDeletion, capability: .destructiveDelete),
+                phase: .confirm,
+                confirmationNonce: nonce
+            ),
+            timeout: timeout
+        ) { proxy, data, reply in
+            proxy.requestDeletion(data, withReply: reply)
+        }
+    }
+
     private func call<Request: Encodable, Response: Decodable>(
         request: Request,
         timeout: TimeInterval,

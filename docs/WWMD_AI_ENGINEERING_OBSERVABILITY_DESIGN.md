@@ -496,10 +496,11 @@ The synchronous setting, cache, mmap, and checkpoint threshold are release
 configuration values measured under test, not copied blindly from a prior
 implementation.
 
-Raw canonical events are immutable. Corrections, deletion requests, adapter
-state changes, and recommendation actions are new events. Retention removes
-expired data only under a transaction and records aggregate deletion receipts,
-never a new copy of data being removed.
+Raw canonical events are immutable. Corrections and recommendation actions are
+new events; collection/adapter state is explicit typed state. A deletion
+transaction records only an aggregate receipt (scope digest, counts, and time),
+never a new copy of the data or raw scope being removed. Retention removes
+expired data only under that transaction.
 
 The initial retention default is 90 days for canonical source events and 365
 days for derived aggregate summaries, configurable per collection class. This
@@ -523,6 +524,12 @@ The physical schema is deliberately small:
 | associations | Candidate and confirmed links with evidence, score, rule version, correction state. | Unique association key/version. |
 | metric_windows | Typed measures by window/dimension, coverage, and price table version. | Unique metric/window/dimension/version. |
 | recommendations | Current rule result state with cooldown, dismissal/snooze sequence references. | Unique rule/scope/rule-version/open-window. |
+| export_receipts | Safe export format/profile/manifest receipt. | Export ID primary key; no exported event copy. |
+| backup_receipts | SQLite backup manifest receipt. | Backup ID primary key; no source data copy. |
+| collection_state | Durable global pause state. | Singleton row. |
+| adapter_preferences | Explicit enabled/disabled state for an adapter configuration. | Adapter/configuration primary key. |
+| managed_outputs | Agent-private record of an export/backup WWMD generated. | Output ID primary key; unique kind/path; path never crosses XPC. |
+| deletion_receipts | Aggregate result of a managed deletion. | Receipt ID primary key; stores scope digest and counts, never raw paths, IDs, or deleted events. |
 | export_receipts | Managed export manifest, filters, redaction profile, checksum, destination label. | No export contents stored. |
 | backup_receipts | Managed backup path label/checksum/creation time. | Supports explicit deletion discovery. |
 
@@ -1032,13 +1039,13 @@ labeled. Test classes are:
 | Adapters | Descriptor allowlist, opt-in state, contract compatibility, bounded batches, checkpoint acknowledgement, health/backoff. |
 | Parsers | Fixture replay, malformed row rejection, fuzz/property input, source rotation, partial CSV resumption. |
 | Deduplication | Same/reordered/replayed batch yields identical ledger/projection hashes. |
-| Storage/migrations | Transaction rollback, compatibility ranges, checksum failure, WAL recovery, integrity check, backup restore. |
+| Storage/migrations | Transaction rollback, compatibility ranges, checksum failure, WAL recovery, integrity check, backup restore, and revision/checksum-guarded managed deletion. |
 | Projection | Full rebuild equals incremental projection, checkpoint crash and replay, late event affected-window rebuild. |
 | Correlation | Evidence atoms, candidate ordering, ambiguity threshold, correction priority, no-causation labels. |
 | Metrics | Formula unit tests, null/missing behavior, sample floors, price effective date, evidence grade. |
 | Recommendations | Golden fixtures by rule version, cooldown/dismiss/snooze, data-quality gates, threshold activation date. |
-| Privacy | Prohibited field rejection, secret-pattern redaction, safe export profile, annotation export toggle, deletion receipts. |
-| XPC/security | Signed-peer requirement in release integration environment, malformed request rejection, capability boundary, query caps. |
+| Privacy | Prohibited field rejection, secret-pattern redaction, safe export profile, annotation export toggle, deletion receipts, and missing/changed managed-output rejection. |
+| XPC/security | Signed-peer requirement in release integration environment, malformed request rejection, capability boundary, query caps, and preview/confirmation deletion nonce handling. |
 | Recovery | Crash at each transaction phase, disk pressure, permission revocation, clock/DST/sleep/wake, DB corruption. |
 | Export | NDJSON manifest/round-trip validation, CSV formula metadata, SQLite backup checksum, re-import only where source contract permits. |
 | Performance | Queue memory cap, write/query p95, idle CPU/RSS measurements, 24-hour release-build soak. |

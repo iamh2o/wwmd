@@ -37,17 +37,18 @@ follow the [quickstart](docs/QUICKSTART.md).
   claiming causation.
 - Native XPC server/client code requires an explicit Mach service and
   code-signing requirement. It supports health, bounded safe summary/evidence/
-  recommendation queries, and durable global pause control; the `wwmd` CLI
-  emits safe JSON and never opens the database itself.
+  recommendation queries, durable global pause control, and a two-phase
+  deletion contract for explicit event scopes and registered output IDs; the
+  `wwmd` CLI emits safe JSON and never opens the database itself.
 - No prompt/response text, source contents, window titles, shell arguments,
   logs, environment values, clipboard, screenshots, keylogging, browser
   history, cloud upload, or background LLM analytics.
 
 Production launchd/Mach-service signing configuration, security-scoped source
-bookmarks and scheduling, UI-to-agent connection, managed deletion of selected
-exports/backups, a real Codex CSV/live-source contract, and release
-performance/security proof remain in progress. WWMD provides no unsigned XPC
-or source-discovery fallback.
+bookmarks and scheduling, UI-to-agent connection, native deletion controls and
+the stopped-agent database/WAL/SHM deletion operation, a real Codex CSV/live-
+source contract, and release performance/security proof remain in progress.
+WWMD provides no unsigned XPC or source-discovery fallback.
 
 ## Build
 

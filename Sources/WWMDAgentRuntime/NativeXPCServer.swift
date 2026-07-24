@@ -113,7 +113,30 @@ public final class WWMDAgentXPCService: NSObject, WWMDXPCService {
     }
 
     public func requestDeletion(_ requestData: Data, withReply reply: @escaping (Data?, NSError?) -> Void) {
-        reply(nil, Self.protocolError(code: 4))
+        do {
+            let request = try XPCCodec.decode(XPCDeletionRequest.self, from: requestData)
+            try XPCContractValidator.validate(request)
+            switch request.phase {
+            case .preview:
+                guard let scope = request.scope else {
+                    reply(nil, Self.protocolError(code: 2))
+                    return
+                }
+                XPCServiceBridge.dispatch(runtime: runtime, reply: reply) { runtime in
+                    try await runtime.previewDeletion(scope: scope)
+                }
+            case .confirm:
+                guard let nonce = request.confirmationNonce else {
+                    reply(nil, Self.protocolError(code: 2))
+                    return
+                }
+                XPCServiceBridge.dispatch(runtime: runtime, reply: reply) { runtime in
+                    try await runtime.confirmDeletion(nonce: nonce)
+                }
+            }
+        } catch {
+            reply(nil, Self.protocolError(code: 1))
+        }
     }
 
     private static func protocolError(code: Int) -> NSError {

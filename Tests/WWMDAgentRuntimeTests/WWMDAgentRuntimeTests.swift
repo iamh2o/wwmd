@@ -43,7 +43,7 @@ final class WWMDAgentRuntimeTests: XCTestCase {
             XCTAssertNotNil(data)
             if let data {
                 let response = try? XPCCodec.decode(XPCHealthResponse.self, from: data)
-                XCTAssertEqual(response?.schemaVersion, 3)
+                XCTAssertEqual(response?.schemaVersion, 4)
                 XCTAssertEqual(response?.eventCount, 0)
                 XCTAssertFalse(response?.globallyPaused ?? true)
             }
@@ -127,6 +127,127 @@ final class WWMDAgentRuntimeTests: XCTestCase {
             controlCompleted.fulfill()
         }
         await fulfillment(of: [controlCompleted], timeout: 2)
+    }
+
+    func testAgentDeletionPreviewConfirmsOnlyOnceAndRemovesRegisteredOutput() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wwmd-runtime-delete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TelemetryStore(path: directory.appendingPathComponent("ledger.sqlite").path)
+        let runtime = WWMDAgentRuntime(store: store, identity: LocalIdentity())
+        try await runtime.setAdapterEnabled(adapterID: "git.local", configurationID: "repo-a", enabled: true)
+        _ = try await runtime.ingest(offer: makeOffer(), configurationID: "repo-a")
+        let exportPath = directory.appendingPathComponent("safe.ndjson").path
+        let export = try await store.export(to: exportPath, format: .ndjson, profile: .safe)
+
+        let scope = XPCDeletionScope(
+            eventScope: XPCDeletionEventScope(
+                from: Date(timeIntervalSince1970: 0),
+                to: Date(timeIntervalSince1970: 2),
+                includeUserSensitiveEvents: true
+            ),
+            managedOutputIDs: [export.exportID]
+        )
+        let preview = try await runtime.previewDeletion(scope: scope, now: Date(timeIntervalSince1970: 10))
+        XCTAssertEqual(preview.matchingEventCount, 1)
+        XCTAssertEqual(preview.managedOutputs.map(\.id), [export.exportID])
+        XCTAssertEqual(preview.managedOutputs.first?.filename, "safe.ndjson")
+        let previewJSON = try String(decoding: XPCCodec.encode(preview), as: UTF8.self)
+        XCTAssertFalse(previewJSON.contains(directory.path))
+        XCTAssertFalse(previewJSON.contains(export.checksum))
+
+        let receipt = try await runtime.confirmDeletion(
+            nonce: preview.confirmationNonce,
+            now: Date(timeIntervalSince1970: 11)
+        )
+        XCTAssertEqual(receipt.deletedEventCount, 1)
+        XCTAssertEqual(receipt.deletedManagedOutputCount, 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportPath))
+        let remainingEvents = try await store.events()
+        XCTAssertTrue(remainingEvents.isEmpty)
+
+        do {
+            _ = try await runtime.confirmDeletion(nonce: preview.confirmationNonce, now: Date(timeIntervalSince1970: 12))
+            XCTFail("Expected a consumed deletion nonce to be rejected")
+        } catch let error as WWMDAgentError {
+            XCTAssertEqual(error, .deletionPreviewNotFound)
+        }
+
+        let eventOnlyScope = XPCDeletionScope(
+            eventScope: scope.eventScope,
+            managedOutputIDs: []
+        )
+        let expiringPreview = try await runtime.previewDeletion(scope: eventOnlyScope, now: Date(timeIntervalSince1970: 20))
+        do {
+            _ = try await runtime.confirmDeletion(
+                nonce: expiringPreview.confirmationNonce,
+                now: Date(timeIntervalSince1970: 81)
+            )
+            XCTFail("Expected an expired deletion nonce to be rejected")
+        } catch let error as WWMDAgentError {
+            XCTAssertEqual(error, .deletionPreviewExpired)
+        }
+    }
+
+    func testXPCDeletionServiceDeliversPreviewThenConfirmation() async throws {
+        let store = try TelemetryStore(path: ":memory:")
+        let runtime = WWMDAgentRuntime(store: store, identity: LocalIdentity())
+        try await runtime.setAdapterEnabled(adapterID: "git.local", configurationID: "repo-a", enabled: true)
+        _ = try await runtime.ingest(offer: makeOffer(), configurationID: "repo-a")
+        let service = WWMDAgentXPCService(runtime: runtime)
+        let scope = XPCDeletionScope(
+            eventScope: XPCDeletionEventScope(
+                from: Date(timeIntervalSince1970: 0),
+                to: Date(timeIntervalSince1970: 2),
+                includeUserSensitiveEvents: true
+            ),
+            managedOutputIDs: []
+        )
+        let previewRequest = try XPCCodec.encode(
+            XPCDeletionRequest(
+                envelope: XPCRequestEnvelope(kind: .requestDeletion, capability: .destructiveDelete),
+                phase: .preview,
+                scope: scope
+            )
+        )
+        let previewBox = XPCDataBox()
+        let previewCompleted = expectation(description: "deletion preview reply")
+        service.requestDeletion(previewRequest) { data, error in
+            XCTAssertNil(error)
+            Task {
+                await previewBox.set(data)
+                previewCompleted.fulfill()
+            }
+        }
+        await fulfillment(of: [previewCompleted], timeout: 2)
+        let previewData = await previewBox.value()
+        let preview = try XCTUnwrap(previewData.flatMap { try? XPCCodec.decode(XPCDeletionPreviewResponse.self, from: $0) })
+        XCTAssertEqual(preview.matchingEventCount, 1)
+
+        let confirmationRequest = try XPCCodec.encode(
+            XPCDeletionRequest(
+                envelope: XPCRequestEnvelope(kind: .requestDeletion, capability: .destructiveDelete),
+                phase: .confirm,
+                confirmationNonce: preview.confirmationNonce
+            )
+        )
+        let confirmationBox = XPCDataBox()
+        let confirmationCompleted = expectation(description: "deletion confirmation reply")
+        service.requestDeletion(confirmationRequest) { data, error in
+            XCTAssertNil(error)
+            Task {
+                await confirmationBox.set(data)
+                confirmationCompleted.fulfill()
+            }
+        }
+        await fulfillment(of: [confirmationCompleted], timeout: 2)
+        let confirmationData = await confirmationBox.value()
+        let receipt = try XCTUnwrap(confirmationData.flatMap { try? XPCCodec.decode(XPCDeletionReceiptResponse.self, from: $0) })
+        XCTAssertEqual(receipt.deletedEventCount, 1)
+        let remainingEvents = try await store.events()
+        XCTAssertTrue(remainingEvents.isEmpty)
     }
 
     func testGitReaderIsNotInvokedBeforeItsExactConfigurationIsOptedIn() async throws {
@@ -252,6 +373,18 @@ private final class CountingGitRunner: GitCommandRunning, @unchecked Sendable {
         default:
             throw GitMetadataReaderError.invalidOutput
         }
+    }
+}
+
+private actor XPCDataBox {
+    private var data: Data?
+
+    func set(_ data: Data?) {
+        self.data = data
+    }
+
+    func value() -> Data? {
+        data
     }
 }
 

@@ -34,7 +34,7 @@ final class TelemetryStoreTests: XCTestCase {
         XCTAssertEqual(events.count, 1)
         XCTAssertEqual(savedCheckpoint?.cursor, "cursor-1")
         XCTAssertEqual(savedProjection?.lastSequence, first.insertedEvents[0].sequence)
-        XCTAssertEqual(health.schemaVersion, 3)
+        XCTAssertEqual(health.schemaVersion, 4)
         XCTAssertEqual(health.eventCount, 1)
         XCTAssertTrue(health.quickCheckPassed)
     }
@@ -76,7 +76,7 @@ final class TelemetryStoreTests: XCTestCase {
         try await store.setProjectionCheckpoint(projection)
         let savedProjection = try await store.projectionCheckpoint(name: "v0.summary", version: 1)
 
-        XCTAssertEqual(health.schemaVersion, 3)
+        XCTAssertEqual(health.schemaVersion, 4)
         XCTAssertEqual(health.eventCount, 0)
         XCTAssertEqual(savedProjection?.projectionName, projection.projectionName)
         XCTAssertEqual(savedProjection?.projectionVersion, projection.projectionVersion)
@@ -146,7 +146,145 @@ final class TelemetryStoreTests: XCTestCase {
         XCTAssertEqual(remainingEvents.count, 1)
     }
 
-    private func makeEvent() throws -> TelemetryEvent {
+    func testManagedOutputsAndExplicitDeletionArePreviewedThenRemoved() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wwmd-managed-delete-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TelemetryStore(path: directory.appendingPathComponent("ledger.sqlite").path)
+        _ = try await store.persist(events: [try makeEvent(), try makeSensitiveAnnotationEvent()])
+        try await store.setProjectionCheckpoint(
+            ProjectionCheckpoint(
+                projectionName: "v0.summary",
+                projectionVersion: 1,
+                lastSequence: 2,
+                rebuildGeneration: 1
+            )
+        )
+
+        let exportPath = directory.appendingPathComponent("safe.ndjson").path
+        let backupPath = directory.appendingPathComponent("backup.sqlite").path
+        let export = try await store.export(to: exportPath, format: .ndjson, profile: .safe)
+        let backup = try await store.backup(to: backupPath)
+        let outputs = try await store.managedOutputs()
+        XCTAssertEqual(Set(outputs.map(\.id)), Set([export.exportID, backup.backupID]))
+
+        let selection = DeletionSelection(
+            eventScope: EventDeletionScope(
+                from: Date(timeIntervalSince1970: 0),
+                to: Date(timeIntervalSince1970: 2),
+                includeUserSensitiveEvents: true
+            ),
+            managedOutputIDs: [export.exportID, backup.backupID]
+        )
+        let preview = try await store.previewDeletion(selection: selection)
+        XCTAssertEqual(preview.matchingEventCount, 2)
+        XCTAssertEqual(preview.managedOutputs.count, 2)
+
+        let receipt = try await store.performDeletion(
+            selection: selection,
+            expectedLatestSequence: preview.latestSequence,
+            scopeDigest: StableHash.sha256("test-managed-delete"),
+            at: Date(timeIntervalSince1970: 3)
+        )
+
+        XCTAssertEqual(receipt.deletedEventCount, 2)
+        XCTAssertEqual(receipt.deletedManagedOutputCount, 2)
+        XCTAssertEqual(receipt.missingManagedOutputCount, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: exportPath))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: backupPath))
+        let remainingEvents = try await store.events()
+        let remainingOutputs = try await store.managedOutputs()
+        let remainingProjection = try await store.projectionCheckpoint(name: "v0.summary", version: 1)
+        XCTAssertTrue(remainingEvents.isEmpty)
+        XCTAssertTrue(remainingOutputs.isEmpty)
+        XCTAssertNil(remainingProjection)
+    }
+
+    func testManagedDeletionRejectsAStaleLedgerPreview() async throws {
+        let store = try TelemetryStore(path: ":memory:")
+        _ = try await store.persist(events: [try makeEvent()])
+        let selection = DeletionSelection(
+            eventScope: EventDeletionScope(
+                from: Date(timeIntervalSince1970: 0),
+                to: Date(timeIntervalSince1970: 3),
+                includeUserSensitiveEvents: true
+            ),
+            managedOutputIDs: []
+        )
+        let preview = try await store.previewDeletion(selection: selection)
+        _ = try await store.persist(events: [try makeEvent(sourceID: "row-2", occurredAt: 2)])
+
+        do {
+            _ = try await store.performDeletion(
+                selection: selection,
+                expectedLatestSequence: preview.latestSequence,
+                scopeDigest: StableHash.sha256("test-stale-delete")
+            )
+            XCTFail("Expected stale preview rejection")
+        } catch let error as TelemetryStoreError {
+            XCTAssertEqual(error, .deletionPreviewStale)
+        }
+    }
+
+    func testManagedDeletionClearsReceiptWhenTheUserAlreadyRemovedTheOutput() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wwmd-missing-output-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TelemetryStore(path: directory.appendingPathComponent("ledger.sqlite").path)
+        let exportPath = directory.appendingPathComponent("safe.ndjson").path
+        let export = try await store.export(to: exportPath, format: .ndjson, profile: .safe)
+        try FileManager.default.removeItem(atPath: exportPath)
+
+        let selection = DeletionSelection(eventScope: nil, managedOutputIDs: [export.exportID])
+        let preview = try await store.previewDeletion(selection: selection)
+        let receipt = try await store.performDeletion(
+            selection: selection,
+            expectedLatestSequence: preview.latestSequence,
+            scopeDigest: StableHash.sha256("test-missing-output")
+        )
+
+        XCTAssertEqual(receipt.deletedEventCount, 0)
+        XCTAssertEqual(receipt.deletedManagedOutputCount, 0)
+        XCTAssertEqual(receipt.missingManagedOutputCount, 1)
+        let outputs = try await store.managedOutputs()
+        XCTAssertTrue(outputs.isEmpty)
+    }
+
+    func testManagedDeletionRefusesAChangedOutput() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wwmd-changed-output-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let store = try TelemetryStore(path: directory.appendingPathComponent("ledger.sqlite").path)
+        let exportPath = directory.appendingPathComponent("safe.ndjson").path
+        let export = try await store.export(to: exportPath, format: .ndjson, profile: .safe)
+        try Data("changed outside WWMD".utf8).write(to: URL(fileURLWithPath: exportPath))
+
+        let selection = DeletionSelection(eventScope: nil, managedOutputIDs: [export.exportID])
+        let preview = try await store.previewDeletion(selection: selection)
+
+        do {
+            _ = try await store.performDeletion(
+                selection: selection,
+                expectedLatestSequence: preview.latestSequence,
+                scopeDigest: StableHash.sha256("test-changed-output")
+            )
+            XCTFail("Expected changed output rejection")
+        } catch let error as TelemetryStoreError {
+            XCTAssertEqual(error, .managedOutputChanged)
+        }
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: exportPath))
+        let outputs = try await store.managedOutputs()
+        XCTAssertEqual(outputs.map(\.id), [export.exportID])
+    }
+
+    private func makeEvent(sourceID: String = "row-1", occurredAt: TimeInterval = 1) throws -> TelemetryEvent {
         let descriptor = AdapterDescriptor(
             id: "test.adapter",
             version: "1",
@@ -156,10 +294,10 @@ final class TelemetryStoreTests: XCTestCase {
         )
         let offer = SourceEventOffer(
             descriptor: descriptor,
-            sourceNativeID: "row-1",
-            sourceIdempotencyKey: StableHash.sha256("storage-row-1"),
+            sourceNativeID: sourceID,
+            sourceIdempotencyKey: StableHash.sha256("storage-\(sourceID)"),
             kind: .aiTurn,
-            occurredAt: Date(timeIntervalSince1970: 1),
+            occurredAt: Date(timeIntervalSince1970: occurredAt),
             payload: ["input_tokens": .number(10)],
             sensitivity: .privateMetadata,
             provenance: ["input_tokens": FieldProvenance(source: "test.adapter", measurement: .measured)]
