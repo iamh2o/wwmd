@@ -101,9 +101,11 @@ swift run WWMDApp
 ~~~
 
 This starts the menu-bar/viewer shell. Click the WWMD menu-bar item, then
-click **Open WWMD** to show the single main viewer window. At the current
-foundation stage it is not connected to a release-configured agent service, so
-it does not imply that collection, summaries, or exports are active.
+click **Open WWMD** to show the single main viewer window. The viewer exposes
+an explicit signed-agent configuration form and can show authenticated agent
+health or toggle durable global pause once the release prerequisites below are
+met. It never opens the local database itself and it does not infer a service
+name, signing requirement, collection source, summary, or export.
 
 ## Production XPC prerequisite
 
@@ -117,6 +119,12 @@ require all of these before they will run:
 There is no unsigned or automatic fallback. Until those prerequisites exist,
 the supported local verification command is `wwmdd --health`, and `wwmd
 --version` is the supported CLI check.
+
+When the release values are available, enter the exact Mach service name and
+the exact agent code-signing requirement in **WWMD → Signed agent
+configuration**, then choose **Test signed agent connection**. Do not enter a
+database path in either field. A failed test leaves collection controls
+disabled rather than connecting by another mechanism.
 
 ## Current collection prerequisites
 

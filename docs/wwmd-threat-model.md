@@ -64,13 +64,14 @@ foundation, not a claim of a complete release daemon.
 | WWMDAgentRuntime | Sole runtime mutation boundary, opt-in enforcement, and native XPC server. | Sources/WWMDAgentRuntime/WWMDAgentRuntime.swift and NativeXPCServer.swift. |
 | wwmdd | Configured native-XPC agent executable and mutable database owner. | Sources/wwmdd/main.swift. |
 | wwmd | Native-XPC-only CLI for safe read-only query/health responses. | Sources/wwmd/main.swift. |
-| WWMDApp | Menu-bar/native viewer scaffold with explicit no-source state. | Sources/WWMDApp/main.swift. |
+| WWMDApp | Menu-bar/native viewer with explicit signed-agent configuration, health, and global-pause control. | Sources/WWMDApp/main.swift. |
 
 ### Data flows and trust boundaries
 
 - User -> WWMDApp: user settings/annotation intent through a native UI. The
-  current scaffold deliberately displays configuration-required state rather
-  than a fake local pause control; release behavior must use signed XPC.
+  app persists only an explicit Mach service name and agent signing requirement,
+  then uses native XPC for health and global-pause control; it has no local
+  database fallback. A release-configured signed service is still required.
 - User-selected source -> static adapter: CSV headers or Git/build/activity
   metadata cross a parsing boundary. The runtime verifies explicit opt-in before
   it reads Git or invokes an explicit validation command; descriptor allowlists
@@ -152,7 +153,7 @@ flowchart TD
 | Migration fixture/schema | Database open | Existing data to new schema | Atomic transactions and schema checks; historic migrations need continued coverage. | Sources/WWMDStorage/TelemetryStore.swift: migrate. |
 | XPC request data | App/CLI agent call | Local client to agent | Typed capability/range validation, explicit listener/client code-signing requirements, and same-user acceptance exist; release signing proof is absent. | Sources/WWMDIPC and Sources/WWMDAgentRuntime/NativeXPCServer.swift. |
 | CLI arguments | User/automation to CLI | Local command to product | CLI accepts explicit XPC configuration and safe query scopes; it never opens/scans the DB. | Sources/wwmd/main.swift. |
-| Menu-bar actions | User to app | Native UI to configured agent | The scaffold reports configuration-required state and does not fake a local persisted pause. | Sources/WWMDApp/main.swift. |
+| Menu-bar actions | User to app | Native UI to configured agent | The app validates only nonempty explicit service/signing inputs, tests native XPC off the main thread, and enables pause only after authenticated health succeeds; it does not fake a local persisted pause. | Sources/WWMDApp/main.swift. |
 
 ## Top abuse paths
 

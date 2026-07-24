@@ -61,7 +61,7 @@ changes predecessor historical activity databases.
 | MET-001 | Value | Computable measured/derived/estimated metric catalog and projections | IN_PROGRESS | feature_implementation | Gate 4 | root | MetricCalculator and ProjectionEngine; token/cache/context/thread/correlation formula and sample-floor tests | Price-table metrics and typed metric-window persistence remain unimplemented | Measured/derived availability semantics and explicit data-gap outcomes are implemented. |
 | REC-001 | Value | Versioned deterministic recommendations, controls, and audit trail | IN_PROGRESS | feature_implementation | Gate 4 | root | RecommendationEngine: data quality, context pressure, long thread, repeated validation; ledger-derived dismiss/snooze test | Native evidence view and persisted materialized recommendation state remain unimplemented | Versioned deterministic proposals, scope keys, and audit events drive active recommendations. |
 | EXP-001 | Value | Privacy-safe NDJSON, CSV-summary, and SQLite backup export | SUCCESS | feature_implementation | Gate 4 | root | TelemetryStore.export/backup; safe-profile, backup, managed-output registry, and purge tests; swift test -> 43 passed | — | Agent-owned safe NDJSON, CSV summary, consistent SQLite backup, checksummed receipts, managed-output registration, and no-overwrite behavior are implemented. |
-| UX-001 | Native product | Collection health, pause, summaries, drill-down, and association correction views | IN_PROGRESS | feature_implementation | Gate 5 | root | Sources/WWMDApp/main.swift menu-bar/viewer scaffold; named `wwmd-main` Window and `Open WWMD` action use native `openWindow` | UI is not yet connected to signed agent XPC or real projected summaries | Visible development state/privacy boundary is implemented; the menu-bar action now explicitly opens the main viewer; functional views remain. |
+| UX-001 | Native product | Collection health, pause, summaries, drill-down, and association correction views | IN_PROGRESS | feature_implementation | Gate 5 | root | Sources/WWMDApp/main.swift explicit Mach-service/designated-requirement form, off-main authenticated health check, durable pause control, named `wwmd-main` Window, and `Open WWMD` action; swift test -> 43 passed | Release Team ID/entitlement/Mach-service configuration is unavailable, and projected summaries/drill-down/correction views are not implemented | The app never opens the database: it enables health/pause only after an explicit configured native XPC connection succeeds, and otherwise reports configuration or connection failure. |
 | CLI-001 | Native product | Read-only local query and export CLI | IN_PROGRESS | feature_implementation | Gate 5 | root | NativeXPCClient and `wwmd health/summary/evidence/recommendations` safe JSON commands; no direct DB access; swift test -> 43 passed | Signed service integration and XPC-mediated export are not wired to a production agent | Functional bounded read-only health/summary/evidence/recommendation surface is implemented behind authenticated XPC configuration. |
 | PRIV-001 | Privacy | Persistent consent/pause, inclusion/exclusion, retention, redaction, and provenance | IN_PROGRESS | feature_implementation | Gate 5 | root | Core PrivacyGate opaque-metadata/secret tests; Store collection/adapter state, scoped purge, checksum-guarded managed deletion; runtime opt-in-before-read/run checks | Repository allowlist/bookmarks, native deletion UI, and source-adapter consent views are not complete | Persistent global pause, explicit adapter opt-in state, core redaction rejection, provenance, retention primitive, and a bounded agent-mediated deletion path are implemented. |
 | DEL-001 | Privacy | Complete local deletion including WAL/SHM/backups/exports selected by user | IN_PROGRESS | feature_implementation | Gate 5 | root | Storage v4 managed-output/deletion-receipt tables; two-phase XPC deletion request; agent-owned 60-second nonce; stale/missing/changed output tests; swift test -> 43 passed | Complete database/WAL/SHM removal must run only after the agent stops, and signed native selection/confirmation UI is not configured | Explicit bounded event deletion and exact registered export/backup deletion are agent-owned, checksum-guarded, revision-bound, and receipt-backed. No raw path or default-all deletion is accepted. |
@@ -89,7 +89,7 @@ Before implementation begins, the root must verify that the design:
 
 Working rows: 16 (12 IN_PROGRESS, 4 OPEN)
 Terminal rows: 11 (9 SUCCESS, 2 BLOCKED)
-Objective complete: no. Foundation/export, bounded XPC query, and managed deletion foundations are complete; collection lifecycle, signed runtime proof, functional app views, XPC export, full database deletion lifecycle, and release proof remain.
+Objective complete: no. Foundation/export, bounded XPC query, managed deletion, and app health/pause foundations are complete; collection lifecycle, signed runtime proof, projected data/correction/deletion views, XPC export, full database deletion lifecycle, and release proof remain.
 
 ## Active implementation slice: managed deletion
 
@@ -130,23 +130,38 @@ follows:
 | V0 boundary | PASS | No network listener, dynamic plugin, source discovery, predecessor data, prompt/content capture, or direct-database app/CLI access was added. |
 | Completion boundary | PARTIAL | Native deletion UI, security-scoped path authority, full stopped-agent DB/WAL/SHM removal flow, and release signing proof remain outside this implemented slice. |
 
+## Signed-app XPC single-owner consistency review
+
+The root re-reviewed the native-app connection slice after its code and
+documentation were written. It does not widen filesystem, collection, or IPC
+authority beyond the frozen V0 boundary.
+
+| Review point | Result | Evidence / boundary |
+|---|---|---|
+| Configuration | PASS | The app persists only nonempty user-entered Mach-service and code-signing-requirement strings; it never accepts a database path, source path, or inferred service. |
+| Process ownership | PASS | `WWMDApp` depends on `WWMDIPC`, not `WWMDStorage`; health and pause use `NativeXPCClient`, while the agent remains the only mutable database owner. |
+| UI behavior | PASS | XPC work runs off the main actor; the app exposes health and pause only after a successful authenticated health response, and connection failure clears the live state and disables mutation. |
+| Trust boundary | PARTIAL | A configured client still sets the exact peer requirement. The app cannot validate a release Team ID, entitlement, or launchd service until those external values exist; `SEC-001` remains open. |
+| V0 scope | PASS | No source enablement, path selection, raw telemetry view, export, deletion confirmation, network listener, or direct-database fallback was added. |
+
 ## Root single-owner post-implementation consistency review
 
 Reviewed against both supplied briefs on 2026-07-24 after the current code and
-documents were written. `PASS` means the current implementation/documentation
-matches the requirement; `PARTIAL` identifies a visible, non-terminal ledger
-row; `BLOCKED` identifies a missing external contract or release configuration.
+documents were written, including the managed-deletion and signed-app-XPC
+slices. `PASS` means the current implementation/documentation matches the
+requirement; `PARTIAL` identifies a visible, non-terminal ledger row; `BLOCKED`
+identifies a missing external contract or release configuration.
 
 | Brief requirement | Result | Reconciliation evidence |
 |---|---|---|
 | New WWMD identity/database; never read, migrate, or alter predecessor history | PASS | Separate public repository and SQLite schema; README/design/PrivacyGate contain no predecessor migration path. |
 | Local-first, offline, single-user, static-code V0; no HTTP/GraphQL/cloud/plugins | PASS | Package target graph, native XPC-only code, and no network dependency/endpoint. |
-| App, persistent agent, and read-only CLI with native XPC | PARTIAL | `WWMDAgentRuntime`, `wwmdd`, `wwmd`, and SwiftUI shell exist; production Mach-service/signing and app connection are not configured. |
+| App, persistent agent, and read-only CLI with native XPC | PARTIAL | `WWMDAgentRuntime`, `wwmdd`, `wwmd`, and SwiftUI app exist; the app can configure and test explicit signed XPC health/pause, but production Mach-service/signing is not available and data views remain incomplete. |
 | SQLite/WAL, one serialized writer, immutable events, atomic migrations/checkpoints, deterministic replay | PASS | `TelemetryStore` actor, WAL settings, v1-to-latest fixture, projection checkpoint, and tests. |
 | Exact Codex CSV/live-source mapping only after real source contract | BLOCKED | G0-003/ADP-CODEX-CSV remain blocked; exact-header gate has no inferred mapping. |
 | Explicit Git, safe activity, explicit build/test, and typed local annotation adapters | PARTIAL | Git/build/activity/annotation boundaries and opt-in checks exist; bookmarks, user-facing consent, activity source, and scheduler/retry lifecycle remain. |
 | Pre-persistence privacy, provenance, sensitivity, no content/title/arguments/log/environment/browser capture | PASS | Closed descriptors, prohibited-field/secret/opaque-ID gate, metadata-only adapters, and regression tests. |
-| Persistent global pause and per-adapter opt-in | PARTIAL | Durable store/runtime enforcement and XPC pause control exist; native UI controls are not connected. |
+| Persistent global pause and per-adapter opt-in | PARTIAL | Durable store/runtime enforcement, XPC pause control, and native signed-XPC pause UI exist; adapter consent/source views remain incomplete. |
 | Evidence-scored correlation, competing candidates, user correction, no causal claims | PARTIAL | Deterministic scoring and ledger-derived correction override exist; typed materialized projection/UI are pending. |
 | V0 data-quality, context-pressure, long-thread, and repeated-validation recommendations with controls | PARTIAL | Deterministic, evidence-gated rules plus ledger-derived dismiss/snooze exist; materialized state/evidence UI are pending. |
 | Redacted NDJSON/CSV/SQLite backup export; cost only with local effective-dated price source | PARTIAL | Safe exports/backups, receipts, and registered-output deletion exist; XPC CLI export and native output selection remain pending; cost remains unavailable without a supplied price table. |
