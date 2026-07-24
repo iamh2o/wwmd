@@ -41,7 +41,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "WWMDApp",
-            dependencies: ["WWMDCore", "WWMDIPC"]
+            dependencies: ["WWMDCore", "WWMDStorage", "WWMDIPC", "WWMDAgentRuntime"]
         ),
         .testTarget(name: "WWMDCoreTests", dependencies: ["WWMDCore"]),
         .testTarget(name: "WWMDStorageTests", dependencies: ["WWMDCore", "WWMDStorage"]),

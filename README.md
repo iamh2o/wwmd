@@ -11,15 +11,15 @@ retain historical activity or window-title data from another application.
 ## Quick start
 
 For macOS/Swift/Git prerequisites, exact setup commands, local database health
-verification, development-app startup, and the intentional signed-XPC boundary,
-follow the [quickstart](docs/QUICKSTART.md).
+verification and development-app startup, follow the
+[quickstart](docs/QUICKSTART.md).
 
 ## Current foundation
 
-- Swift 6 / macOS 13+ modular package with a menu-bar/viewer that accepts only
-  an explicit signed-agent configuration, agent executable, read-only CLI
-  contract, Core, SQLite storage, adapters, analytics, and IPC contract
-  modules.
+- Swift 6 / macOS 13+ modular package with a menu-bar/viewer that explicitly
+  opens one local database file and owns its in-process runtime. The package
+  also contains Core, SQLite storage, adapters, analytics, and a future IPC
+  contract module.
 - Immutable, provenance-carrying TelemetryEventV1 records validated before
   persistence, including bounded opaque metadata identifiers and rejection of
   prohibited content fields/secret-shaped values.
@@ -36,22 +36,20 @@ follow the [quickstart](docs/QUICKSTART.md).
   evidence rules, and recommendation foundations. Ledger-backed user
   correction and dismiss/snooze controls override automatic results without
   claiming causation.
-- Native XPC server/client code requires an explicit Mach service and
-  code-signing requirement. It supports health, bounded safe summary/evidence/
-  recommendation queries, durable global pause control, and a two-phase
-  deletion contract for explicit event scopes and registered output IDs. The
-  app uses that same authenticated client for health, global-pause control,
-  and user-requested bounded summary/recommendation views; the `wwmd` CLI
-  emits safe JSON and never opens the database itself.
+- V0 is single-process local mode: the app acquires an exclusive lease for the
+  exact database path, owns the runtime, and makes bounded health, pause, and
+  explicit date-range summary/recommendation calls in-process. It starts no
+  Mach service, socket, daemon, or network listener. The `wwmd` CLI never
+  opens the database. Native XPC code is deferred to a future signed release,
+  not a requirement for current use.
 - No prompt/response text, source contents, window titles, shell arguments,
   logs, environment values, clipboard, screenshots, keylogging, browser
   history, cloud upload, or background LLM analytics.
 
-Production launchd/Mach-service signing configuration, security-scoped source
-bookmarks and scheduling, projected data/adapter-consent/deletion views, the
-stopped-agent database/WAL/SHM deletion operation, a real Codex CSV/live-source
-contract, and release performance/security proof remain in progress. WWMD
-provides no unsigned XPC or source-discovery fallback.
+Security-scoped source bookmarks and scheduling, projected data/adapter-
+consent/deletion views, the stopped-app database/WAL/SHM deletion operation, a
+real Codex CSV/live-source contract, native XPC packaging for a later release,
+and release performance/security proof remain in progress.
 
 ## Build
 
@@ -61,20 +59,16 @@ swift run WWMDApp
 swift run wwmd --version
 ~~~
 
-The foundation agent health command requires an explicit database path:
+The optional closed-app health diagnostic requires an explicit database path:
 
 ~~~text
 swift run wwmdd --database /absolute/path/to/wwmd.sqlite --health
 ~~~
 
-When a signed agent and its exact requirement are configured, the read-only
-CLI surface is deliberately explicit:
-
-~~~text
-swift run wwmd summary --mach-service <name> --agent-requirement <requirement> --from <RFC3339> --to <RFC3339>
-swift run wwmd evidence --mach-service <name> --agent-requirement <requirement> --from <RFC3339> --to <RFC3339> --limit <1-200>
-swift run wwmd recommendations --mach-service <name> --agent-requirement <requirement> --from <RFC3339> --to <RFC3339>
-~~~
+For normal use, run `swift run WWMDApp`, enter an absolute database file path,
+and choose **Open selected database**. Do not run `wwmdd` against that same
+database while the app is open: both supported entrypoints acquire the same
+exclusive local lease.
 
 ## Design and ledger
 

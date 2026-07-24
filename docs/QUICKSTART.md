@@ -1,8 +1,8 @@
 # WWMD Quickstart
 
 This guide gets a local development checkout to a verified database-health
-check and the native app shell. It does not configure collection sources or a
-production XPC service.
+check and the native app. V0 runs entirely in that app process; it does not
+configure collection sources, XPC, a socket, or a background service.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ swift run wwmd --version
 The initial `swift` invocation may download nothing but still takes longer
 while SwiftPM builds the package. Later invocations reuse `.build/`.
 
-## Create and inspect a local WWMD database
+## Create and inspect a local WWMD database (optional)
 
 Choose a database **file** path. The value after `--database` must end in a
 filename such as `wwmd.sqlite`; it must not be only a directory path.
@@ -73,7 +73,7 @@ Expected output has this shape:
 wwmdd database health: schema=<number> events=0 quick_check=ok
 ~~~
 
-The agent creates the parent directory if needed, but creating it explicitly
+WWMD creates the parent directory if needed, but creating it explicitly
 makes the location clear. The database is local to this Mac and starts with no
 collected events.
 
@@ -92,7 +92,7 @@ for example:
 swift run wwmdd --database "$PWD/.local/wwmd.sqlite" --health
 ~~~
 
-## Start the development app shell
+## Start the development app
 
 Run the native development UI from the checkout:
 
@@ -100,36 +100,28 @@ Run the native development UI from the checkout:
 swift run WWMDApp
 ~~~
 
-This starts the menu-bar/viewer shell. Click the WWMD menu-bar item, then
-click **Open WWMD** to show the single main viewer window. The viewer exposes
-an explicit signed-agent configuration form and can show authenticated agent
-health or toggle durable global pause once the release prerequisites below are
-met. It never opens the local database itself and it does not infer a service
-name, signing requirement, collection source, query scope, or export.
+This starts the menu-bar/viewer app. Click the WWMD menu-bar item, then click
+**Open WWMD** to show its main window. In **Local database**, enter the exact
+absolute file path you chose above (for example,
+`$HOME/Library/Application Support/WWMD/wwmd.sqlite`) and click **Open selected
+database**. The app acquires the exclusive local runtime lease, creates and
+migrates the database if necessary, and shows its health.
 
-## Production XPC prerequisite
+With the database open, choose an explicit **From** and **To** date range, then
+click **Load dashboard**. The app does not auto-query a date range, expose
+event payloads, or turn on a collection source. It runs no second process: the
+app is the only WWMD runtime for the selected database until you close it or
+quit WWMD.
 
-The `wwmd` query commands and persistent `wwmdd --serve` mode intentionally
-require all of these before they will run:
+Do not run `wwmdd --health` against the same path while WWMD is open. The
+diagnostic and the app deliberately use the same exclusive lease. Close the
+database in the app first if you need to run a closed-app health check.
 
-1. A configured launchd/Mach service name.
-2. A concrete code-signing requirement for the peer.
-3. A signed app/agent release configuration that satisfies those requirements.
+## Deferred native XPC path
 
-There is no unsigned or automatic fallback. Until those prerequisites exist,
-the supported local verification command is `wwmdd --health`, and `wwmd
---version` is the supported CLI check.
-
-When the release values are available, enter the exact Mach service name and
-the exact agent code-signing requirement in **WWMD → Signed agent
-configuration**, then choose **Test signed agent connection**. Do not enter a
-database path in either field. A failed test leaves collection controls
-disabled rather than connecting by another mechanism.
-
-After a successful test, use **Load selected range** in the viewer to request
-safe summary metrics and evidence-backed recommendations for the exact visible
-date range. WWMD does not auto-query a date range, expose event payloads, or
-turn on any source while connecting the viewer.
+Native XPC source and CLI support remain in the repository for a future signed
+packaged release. It is not part of V0 setup and there is no Mach service name,
+code-signing requirement, launchd job, or XPC value to obtain or enter today.
 
 ## Current collection prerequisites
 
@@ -151,8 +143,8 @@ for the release gates and outstanding work.
 
 | Symptom | Resolution |
 |---|---|
-| `wwmdd` prints its usage text | Supply an exact supported mode: `--health` for a one-shot local check, or the fully configured signed `--serve` form. |
+| `wwmdd` prints its usage text | Supply the current one-shot local mode: `--database /absolute/path/wwmd.sqlite --health`. |
 | `swift --version` reports a version below 6 | Install or select a Swift 6 Xcode/Command Line Tools toolchain, then rerun the checks. |
 | A path such as `$PWD/db/` fails | Pass a file path such as `$PWD/.local/wwmd.sqlite`; do not point the database option at a directory. |
-| XPC CLI query command refuses to run | Configure the signed launchd/Mach service and exact peer requirement. WWMD deliberately does not substitute an unsigned connection. |
+| `database already in use` | WWMD or another supported diagnostic already owns that exact database. Close it before retrying; do not force a second runtime. |
 | A previous database path already exists | Select a different new filename, or inspect the existing local data before deciding whether it may be removed. |

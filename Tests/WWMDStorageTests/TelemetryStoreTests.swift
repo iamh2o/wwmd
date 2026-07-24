@@ -4,6 +4,30 @@ import SQLite3
 @testable import WWMDStorage
 
 final class TelemetryStoreTests: XCTestCase {
+    func testDatabaseLeaseRejectsAnotherSupportedRuntimeForTheSameDatabase() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wwmd-lease-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("ledger.sqlite").path
+
+        let first = try DatabaseLease(databasePath: path)
+        XCTAssertThrowsError(try DatabaseLease(databasePath: path)) { error in
+            XCTAssertEqual(error as? DatabaseLeaseError, .databaseAlreadyInUse)
+        }
+        withExtendedLifetime(first) {}
+    }
+
+    func testDatabaseLeaseRejectsDirectoryPath() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wwmd-lease-directory-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        XCTAssertThrowsError(try DatabaseLease(databasePath: directory.path)) { error in
+            XCTAssertEqual(error as? DatabaseLeaseError, .databasePathIsDirectory)
+        }
+    }
+
     func testStorePersistsDeduplicatesAndCheckpointsAtomically() async throws {
         let store = try TelemetryStore(path: ":memory:")
         let event = try makeEvent()

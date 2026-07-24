@@ -14,7 +14,8 @@ struct WWMDDAgent {
         }
 
         do {
-            let store = try TelemetryStore(path: database)
+            let lease = try DatabaseLease(databasePath: database)
+            let store = try TelemetryStore(path: lease.databasePath)
             let runtime = WWMDAgentRuntime(store: store, identity: LocalIdentity())
             if arguments == ["--database", database, "--health"] {
                 let health = try await runtime.health()

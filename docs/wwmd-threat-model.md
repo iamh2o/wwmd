@@ -4,6 +4,23 @@ Status: implementation-grounded foundation review
 Date: 2026-07-24
 Scope: /Users/jmajor/projects/iamh2o/wwmd
 
+## V0 architecture amendment — 2026-07-24
+
+The implementation owner approved single-process local mode for V0. WWMD.app
+explicitly opens one local database and owns the in-process runtime; it starts
+no Mach service, XPC listener, Unix socket, daemon, HTTP listener, or network
+service. `DatabaseLease` makes a second supported app or `wwmdd --health`
+invocation for the same database fail. The direct-database-free `wwmd` CLI and
+native XPC code are deferred to a future signed packaged release.
+
+Accordingly, every later native-XPC/agent-process threat statement is a
+**deferred-release threat**, not a current V0 trust boundary. The active V0
+boundaries are user-to-app, opt-in adapter-to-runtime, runtime-to-lease-held
+SQLite database, and runtime-to-managed export/backup destination. This
+amendment removes peer-spoofing as a V0 release gate; it does not relax privacy
+filtering, explicit source consent, lease ownership, SQLite integrity, bounded
+queries, or deletion safeguards.
+
 ## Assumption validation record
 
 The user-supplied product contract establishes these operating assumptions:
@@ -13,9 +30,9 @@ The user-supplied product contract establishes these operating assumptions:
 - Telemetry may be private metadata and user-sensitive annotations, but V0
   excludes prompts, responses, source contents, titles, arguments, logs,
   environment values, clipboard, screen, key, and browser capture.
-- The intended runtime has a signed app, agent, and CLI that communicate by
-  native XPC; the exact release Team ID, entitlement, and distribution setup
-  are not yet supplied.
+- V0 has one app-owned runtime and an exclusive database lease. Native XPC,
+  code-signing peer requirements, and a separate CLI service are future-release
+  design material, not an active runtime requirement.
 - Codex CSV and live-source contracts are unavailable; the implementation must
   fail closed rather than discover or infer either source.
 
@@ -26,18 +43,15 @@ those features out of scope and marks conclusions about them conditional.
 
 ## Executive summary
 
-WWMD's highest risks are local telemetry privacy/integrity failures: a local
-process spoofing the agent client boundary, a parser or source adapter
-admitting content/secrets, and a mispackaged release weakening the intended
-native XPC trust boundary. The current foundation has strong schema/field
-validation, a single SQLite writer actor, an exact-contract CSV gate, an
-explicit-root Git reader, native XPC server/client code that requires explicit
-code-signing requirements, and a CLI that never opens the database. It does
-not yet have a release-configured/running XPC service, security-scoped source
-bookmarks/scheduling, a native deletion UI/full stopped-agent database-deletion
-operation, or release-signing proof; those remain high-priority implementation
-gates. The agent now has a bounded, two-phase deletion path for explicit event
-scopes and registered exports/backups.
+WWMD's active V0 risks are local telemetry privacy/integrity failures: a parser
+or source adapter admitting content/secrets, unapproved concurrent database
+access, and loss or tampering of local durable data. The foundation has strong
+schema/field validation, a single SQLite writer actor, an exclusive supported
+runtime lease, an exact-contract CSV gate, an explicit-root Git reader, and a
+CLI that never opens the database. It does not yet have security-scoped source
+bookmarks/scheduling, a native deletion UI/full stopped-app database-deletion
+operation, or release proof. Native XPC signing risk remains deferred until a
+future multi-process release is approved.
 
 ## Scope and assumptions
 

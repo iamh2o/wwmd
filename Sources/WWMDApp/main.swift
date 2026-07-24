@@ -2,607 +2,445 @@ import AppKit
 import Combine
 import Foundation
 import SwiftUI
+import WWMDAgentRuntime
+import WWMDCore
 import WWMDIPC
+import WWMDStorage
 
 private enum WWMDWindowID {
     static let main = "wwmd-main"
 }
 
-private struct AgentConnectionConfiguration: Equatable, Sendable {
-    let machServiceName: String
-    let agentRequirement: String
+private struct LocalHealth: Equatable, Sendable {
+    let schemaVersion: Int
+    let eventCount: Int
+    let quickCheckPassed: Bool
+    let globallyPaused: Bool
+}
 
-    init(machServiceName: String, agentRequirement: String) {
-        self.machServiceName = machServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
-        self.agentRequirement = agentRequirement.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    var isComplete: Bool {
-        !machServiceName.isEmpty && !agentRequirement.isEmpty
-    }
+private struct OpenedLocalRuntime: @unchecked Sendable {
+    let databasePath: String
+    let lease: DatabaseLease
+    let runtime: WWMDAgentRuntime
+    let health: StoreHealth
+    let collection: CollectionState
 }
 
 @MainActor
-private final class AgentConnectionModel: ObservableObject {
+private final class LocalRuntimeModel: ObservableObject {
     private enum State: Equatable {
-        case setupRequired
-        case ready
-        case connecting
+        case databaseRequired
+        case opening
         case active
         case unavailable(String)
     }
 
-    private enum HealthAttempt: Sendable {
-        case success(XPCHealthResponse)
-        case failure(String)
-    }
-
-    private enum PauseAttempt: Sendable {
-        case success(XPCCollectionStateResponse)
-        case failure(String)
-    }
-
-    private enum DashboardAttempt: Sendable {
-        case success(XPCSummaryResponse, [XPCRecommendationItem])
-        case failure(String)
-    }
-
-    @Published private(set) var health: XPCHealthResponse?
+    @Published private(set) var health: LocalHealth?
     @Published private(set) var summary: XPCSummaryResponse?
     @Published private(set) var recommendations: [XPCRecommendationItem] = []
     @Published private(set) var dashboardMessage: String?
     @Published private(set) var isLoadingDashboard = false
     @Published private(set) var isMutating = false
-    @Published private var state: State = .setupRequired
+    @Published private var state: State = .databaseRequired
 
-    private var configuration = AgentConnectionConfiguration(machServiceName: "", agentRequirement: "")
+    private var runtime: WWMDAgentRuntime?
+    private var lease: DatabaseLease?
+    private var activeDatabasePath: String?
     private var operationID = UUID()
     private var dashboardOperationID = UUID()
 
     var statusTitle: String {
         switch state {
-        case .setupRequired:
-            "Agent configuration required"
-        case .ready:
-            "Signed agent not checked"
-        case .connecting:
-            "Checking signed agent"
+        case .databaseRequired:
+            "Local database required"
+        case .opening:
+            "Opening local database"
         case .active:
-            health?.globallyPaused == true ? "Collection paused" : "Agent connected"
+            health?.globallyPaused == true ? "Collection paused" : "Local runtime active"
         case .unavailable:
-            "Agent unavailable"
+            "Local runtime unavailable"
         }
     }
 
     var statusDetail: String {
         switch state {
-        case .setupRequired:
-            return "Enter an explicit Mach service name and agent code-signing requirement. WWMD will not infer either value."
-        case .ready:
-            return "The signed-agent configuration is stored locally. Test the authenticated XPC connection before collection controls appear."
-        case .connecting:
-            return "WWMD is checking the configured native XPC service."
+        case .databaseRequired:
+            return "Enter one absolute database file path, then explicitly open it. WWMD does not infer a path or start a separate service."
+        case .opening:
+            return "WWMD is acquiring the exclusive local runtime lease and checking the selected database."
         case .active:
-            guard let health else { return "The agent returned no health state." }
+            guard let health else { return "The local runtime returned no health state." }
             return "Schema \(health.schemaVersion), \(health.eventCount) events, database check \(health.quickCheckPassed ? "passed" : "failed")."
         case .unavailable(let message):
             return message
         }
     }
 
-    var isConnecting: Bool {
-        state == .connecting
-    }
+    var isOpening: Bool { state == .opening }
+    var isActive: Bool { runtime != nil && health != nil && state == .active }
+    var canControlCollection: Bool { isActive && !isMutating }
+    var currentDatabasePath: String? { activeDatabasePath }
 
-    var canControlCollection: Bool {
-        health != nil && !isConnecting && !isMutating
-    }
-
-    func adopt(_ configuration: AgentConnectionConfiguration) {
-        guard self.configuration != configuration else { return }
-        self.configuration = configuration
-        operationID = UUID()
-        dashboardOperationID = UUID()
-        health = nil
-        summary = nil
-        recommendations = []
-        dashboardMessage = nil
-        isLoadingDashboard = false
-        isMutating = false
-        state = configuration.isComplete ? .ready : .setupRequired
-    }
-
-    func refresh(using configuration: AgentConnectionConfiguration) {
-        adopt(configuration)
-        guard configuration.isComplete else {
-            state = .setupRequired
+    func open(databasePath rawPath: String) {
+        let path = URL(fileURLWithPath: rawPath.trimmingCharacters(in: .whitespacesAndNewlines))
+            .standardizedFileURL.path
+        guard path.hasPrefix("/"), path != "/" else {
+            becomeUnavailable("The database path must be an absolute file path.")
             return
         }
+
+        closeRuntime()
         let currentOperationID = UUID()
         operationID = currentOperationID
-        dashboardOperationID = UUID()
-        health = nil
-        summary = nil
-        recommendations = []
-        dashboardMessage = nil
-        isLoadingDashboard = false
-        isMutating = false
-        state = .connecting
+        state = .opening
 
-        Task { [configuration, currentOperationID] in
-            let result = await Task.detached(priority: .userInitiated) { () -> HealthAttempt in
-                do {
-                    let client = try NativeXPCClient(
-                        machServiceName: configuration.machServiceName,
-                        agentCodeSigningRequirement: configuration.agentRequirement
+        Task { [currentOperationID, path] in
+            do {
+                let opened = try await Task.detached(priority: .userInitiated) { () throws -> OpenedLocalRuntime in
+                    let lease = try DatabaseLease(databasePath: path)
+                    let store = try TelemetryStore(path: lease.databasePath)
+                    let runtime = WWMDAgentRuntime(store: store, identity: LocalIdentity())
+                    let health = try await runtime.health()
+                    let collection = try await runtime.collectionState()
+                    return OpenedLocalRuntime(
+                        databasePath: lease.databasePath,
+                        lease: lease,
+                        runtime: runtime,
+                        health: health,
+                        collection: collection
                     )
-                    return .success(try client.health())
-                } catch {
-                    return .failure(error.localizedDescription)
-                }
-            }.value
-
-            guard self.operationID == currentOperationID else { return }
-            switch result {
-            case .success(let health):
-                self.health = health
+                }.value
+                guard self.operationID == currentOperationID else { return }
+                self.runtime = opened.runtime
+                self.lease = opened.lease
+                self.activeDatabasePath = opened.databasePath
+                self.health = Self.localHealth(opened.health, collection: opened.collection)
                 self.state = .active
-            case .failure(let message):
-                self.health = nil
-                self.dashboardOperationID = UUID()
-                self.summary = nil
-                self.recommendations = []
-                self.isLoadingDashboard = false
-                self.state = .unavailable(message)
-                self.dashboardMessage = message
+            } catch {
+                guard self.operationID == currentOperationID else { return }
+                self.becomeUnavailable(error.localizedDescription)
             }
         }
     }
 
-    func setCollectionPaused(_ paused: Bool, using configuration: AgentConnectionConfiguration) {
-        adopt(configuration)
-        guard configuration.isComplete, health != nil else {
-            state = configuration.isComplete ? .ready : .setupRequired
+    func close() {
+        operationID = UUID()
+        dashboardOperationID = UUID()
+        closeRuntime()
+        state = .databaseRequired
+    }
+
+    func refresh() {
+        guard let runtime else {
+            state = .databaseRequired
+            return
+        }
+        let currentOperationID = UUID()
+        operationID = currentOperationID
+        state = .opening
+        Task { [currentOperationID, runtime] in
+            do {
+                let result = try await Self.readHealth(runtime: runtime)
+                guard self.operationID == currentOperationID else { return }
+                self.health = result
+                self.state = .active
+            } catch {
+                guard self.operationID == currentOperationID else { return }
+                self.becomeUnavailable(error.localizedDescription)
+            }
+        }
+    }
+
+    func setCollectionPaused(_ paused: Bool) {
+        guard let runtime, health != nil else {
+            state = .databaseRequired
             return
         }
         let currentOperationID = UUID()
         operationID = currentOperationID
         isMutating = true
-
-        Task { [configuration, currentOperationID] in
-            let result = await Task.detached(priority: .userInitiated) { () -> PauseAttempt in
-                do {
-                    let client = try NativeXPCClient(
-                        machServiceName: configuration.machServiceName,
-                        agentCodeSigningRequirement: configuration.agentRequirement
-                    )
-                    return .success(try client.setCollectionState(paused))
-                } catch {
-                    return .failure(error.localizedDescription)
-                }
-            }.value
-
-            guard self.operationID == currentOperationID else { return }
-            self.isMutating = false
-            switch result {
-            case .success(let response):
-                if let health = self.health {
-                    self.health = XPCHealthResponse(
-                        schemaVersion: health.schemaVersion,
-                        eventCount: health.eventCount,
-                        quickCheckPassed: health.quickCheckPassed,
-                        globallyPaused: response.globallyPaused
-                    )
-                }
+        Task { [currentOperationID, runtime] in
+            do {
+                _ = try await runtime.setCollectionState(paused)
+                let refreshed = try await Self.readHealth(runtime: runtime)
+                guard self.operationID == currentOperationID else { return }
+                self.health = refreshed
+                self.isMutating = false
                 self.state = .active
-            case .failure(let message):
-                self.health = nil
-                self.dashboardOperationID = UUID()
-                self.summary = nil
-                self.recommendations = []
-                self.isLoadingDashboard = false
-                self.state = .unavailable(message)
-                self.dashboardMessage = message
+            } catch {
+                guard self.operationID == currentOperationID else { return }
+                self.isMutating = false
+                self.becomeUnavailable(error.localizedDescription)
             }
         }
     }
 
-    func loadDashboard(
-        from: Date,
-        to: Date,
-        using configuration: AgentConnectionConfiguration
-    ) {
-        adopt(configuration)
-        guard configuration.isComplete, health != nil else {
-            dashboardMessage = "Connect to the configured signed agent before loading a summary."
+    func loadDashboard(from: Date, to: Date) {
+        guard let runtime, health != nil else {
+            dashboardMessage = "Open the selected local database before loading a summary."
             return
         }
-        let summaryQuery = SummaryQuery(from: from, to: to, metricNames: [])
+        let query = SummaryQuery(from: from, to: to, metricNames: [])
         let recommendationScope = XPCScopedQuery(from: from, to: to)
         do {
-            try XPCContractValidator.validate(summaryQuery)
+            try XPCContractValidator.validate(query)
             try XPCContractValidator.validateScope(recommendationScope)
         } catch {
-            summary = nil
-            recommendations = []
             dashboardMessage = error.localizedDescription
             return
         }
+        let currentOperationID = UUID()
+        dashboardOperationID = currentOperationID
+        isLoadingDashboard = true
+        dashboardMessage = nil
+        Task { [currentOperationID, runtime, query, recommendationScope] in
+            do {
+                async let summary = runtime.summary(query: query)
+                async let recommendations = runtime.recommendations(query: recommendationScope)
+                let result = try await (summary, recommendations)
+                guard self.dashboardOperationID == currentOperationID else { return }
+                self.summary = result.0
+                self.recommendations = result.1.items
+                self.isLoadingDashboard = false
+            } catch {
+                guard self.dashboardOperationID == currentOperationID else { return }
+                self.summary = nil
+                self.recommendations = []
+                self.dashboardMessage = error.localizedDescription
+                self.isLoadingDashboard = false
+            }
+        }
+    }
 
-        let currentDashboardOperationID = UUID()
-        dashboardOperationID = currentDashboardOperationID
+    private func closeRuntime() {
+        runtime = nil
+        lease = nil
+        activeDatabasePath = nil
+        health = nil
         summary = nil
         recommendations = []
         dashboardMessage = nil
-        isLoadingDashboard = true
+        isLoadingDashboard = false
+        isMutating = false
+    }
 
-        Task { [configuration, currentDashboardOperationID] in
-            let result = await Task.detached(priority: .userInitiated) { () -> DashboardAttempt in
-                do {
-                    let client = try NativeXPCClient(
-                        machServiceName: configuration.machServiceName,
-                        agentCodeSigningRequirement: configuration.agentRequirement
-                    )
-                    let summary = try client.summary(summaryQuery)
-                    let recommendations = try client.recommendations(recommendationScope)
-                    return .success(summary, recommendations.items)
-                } catch {
-                    return .failure(error.localizedDescription)
-                }
-            }.value
+    private func becomeUnavailable(_ message: String) {
+        closeRuntime()
+        state = .unavailable(message)
+        dashboardMessage = message
+    }
 
-            guard self.dashboardOperationID == currentDashboardOperationID else { return }
-            self.isLoadingDashboard = false
-            switch result {
-            case .success(let summary, let recommendations):
-                self.summary = summary
-                self.recommendations = recommendations
-            case .failure(let message):
-                self.health = nil
-                self.dashboardOperationID = UUID()
-                self.summary = nil
-                self.recommendations = []
-                self.isLoadingDashboard = false
-                self.state = .unavailable(message)
-                self.dashboardMessage = message
-            }
-        }
+    private static func readHealth(runtime: WWMDAgentRuntime) async throws -> LocalHealth {
+        let health = try await runtime.health()
+        let collection = try await runtime.collectionState()
+        return localHealth(health, collection: collection)
+    }
+
+    private static func localHealth(_ health: StoreHealth, collection: CollectionState) -> LocalHealth {
+        LocalHealth(
+            schemaVersion: health.schemaVersion,
+            eventCount: health.eventCount,
+            quickCheckPassed: health.quickCheckPassed,
+            globallyPaused: collection.globallyPaused
+        )
     }
 }
 
 @main
 struct WWMDApp: App {
-    @AppStorage("wwmd.agent.machServiceName") private var machServiceName = ""
-    @AppStorage("wwmd.agent.codeSigningRequirement") private var agentRequirement = ""
-    @StateObject private var agentConnection = AgentConnectionModel()
-
-    private var configuration: AgentConnectionConfiguration {
-        AgentConnectionConfiguration(
-            machServiceName: machServiceName,
-            agentRequirement: agentRequirement
-        )
-    }
+    @AppStorage("wwmd.local.databasePath") private var databasePath = ""
+    @StateObject private var model = LocalRuntimeModel()
 
     var body: some Scene {
-        MenuBarExtra("WWMD", systemImage: "hand.raised.circle") {
-            WWMDMenuBarContents(configuration: configuration)
-                .environmentObject(agentConnection)
+        MenuBarExtra("WWMD", systemImage: "waveform.path.ecg") {
+            MenuContent(databasePath: $databasePath, model: model)
         }
         .menuBarExtraStyle(.window)
 
         Window("WWMD", id: WWMDWindowID.main) {
-            WWMDViewer(
-                machServiceName: $machServiceName,
-                agentRequirement: $agentRequirement
-            )
-            .environmentObject(agentConnection)
+            ViewerContent(databasePath: $databasePath, model: model)
+                .frame(minWidth: 760, minHeight: 650)
         }
-
-        Settings {
-            WWMDSettings(
-                machServiceName: $machServiceName,
-                agentRequirement: $agentRequirement
-            )
-            .environmentObject(agentConnection)
-        }
+        .defaultSize(width: 880, height: 760)
     }
 }
 
-private struct WWMDMenuBarContents: View {
-    let configuration: AgentConnectionConfiguration
-
-    @Environment(\.openWindow) private var openWindow
-    @EnvironmentObject private var agentConnection: AgentConnectionModel
+private struct MenuContent: View {
+    @Binding var databasePath: String
+    @ObservedObject var model: LocalRuntimeModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text(agentConnection.statusTitle)
-                .font(.headline)
-            Text(agentConnection.statusDetail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            if let health = agentConnection.health {
-                Divider()
-                LabeledContent("Events", value: "\(health.eventCount)")
-                LabeledContent("Global pause", value: health.globallyPaused ? "Paused" : "Active")
-                Button(health.globallyPaused ? "Resume collection" : "Pause collection") {
-                    agentConnection.setCollectionPaused(!health.globallyPaused, using: configuration)
+        VStack(alignment: .leading, spacing: 14) {
+            Text(model.statusTitle).font(.headline)
+            Text(model.statusDetail).font(.subheadline).foregroundStyle(.secondary)
+
+            if let activePath = model.currentDatabasePath {
+                Text(activePath).font(.caption).textSelection(.enabled)
+            }
+
+            HStack {
+                Button(model.isOpening ? "Opening…" : "Open selected database") {
+                    model.open(databasePath: databasePath)
                 }
-                .disabled(!agentConnection.canControlCollection)
+                .disabled(databasePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isOpening)
+
+                if model.isActive {
+                    Button("Refresh") { model.refresh() }
+                    Button(model.health?.globallyPaused == true ? "Resume collection" : "Pause collection") {
+                        model.setCollectionPaused(model.health?.globallyPaused != true)
+                    }
+                    .disabled(!model.canControlCollection)
+                    Button("Close database") { model.close() }
+                }
             }
+
             Divider()
-            Button(agentConnection.isConnecting ? "Checking agent…" : "Refresh signed agent") {
-                agentConnection.refresh(using: configuration)
-            }
-            .disabled(!configuration.isComplete || agentConnection.isConnecting || agentConnection.isMutating)
-            Button("Open WWMD") {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: WWMDWindowID.main)
-            }
+
+            Button("Open WWMD") { openMainWindow() }
+            Button("Quit WWMD") { NSApplication.shared.terminate(nil) }
+
             Divider()
             Text("Privacy: metadata only; no prompt, response, title, source, or shell content.")
-                .font(.caption2)
+                .font(.caption)
                 .fixedSize(horizontal: false, vertical: true)
-            Button("Quit WWMD") {
-                NSApp.terminate(nil)
-            }
+            Text("Single-process local mode. No socket, daemon, or XPC listener is started.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
-        .padding()
-        .frame(width: 340)
-        .onAppear {
-            agentConnection.adopt(configuration)
-        }
-        .onChange(of: configuration) { newValue in
-            agentConnection.adopt(newValue)
+        .padding(20)
+        .frame(width: 470)
+    }
+
+    private func openMainWindow() {
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == WWMDWindowID.main }) {
+            window.makeKeyAndOrderFront(nil)
         }
     }
 }
 
-private struct WWMDViewer: View {
-    @Binding var machServiceName: String
-    @Binding var agentRequirement: String
-
-    @EnvironmentObject private var agentConnection: AgentConnectionModel
-    @State private var summaryFrom = Calendar.current.startOfDay(for: Date())
-    @State private var summaryTo = Date()
-
-    private var configuration: AgentConnectionConfiguration {
-        AgentConnectionConfiguration(
-            machServiceName: machServiceName,
-            agentRequirement: agentRequirement
-        )
-    }
+private struct ViewerContent: View {
+    @Binding var databasePath: String
+    @ObservedObject var model: LocalRuntimeModel
+    @State private var from = Calendar.current.date(byAdding: .day, value: -7, to: Date()) ?? Date()
+    @State private var to = Date()
 
     var body: some View {
-        NavigationSplitView {
-            List {
-                Label("Today", systemImage: "calendar")
-                Label("Current Session", systemImage: "clock")
-                Label("Recommendations", systemImage: "lightbulb")
-                Label("Data Quality", systemImage: "checkmark.shield")
-                Label("Privacy", systemImage: "hand.raised")
-            }
-            .navigationTitle("WWMD")
-        } detail: {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label(agentConnection.statusTitle, systemImage: agentConnection.health == nil ? "xmark.shield" : "checkmark.shield")
-                            .font(.title3)
-                        Text(agentConnection.statusDetail)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("WWMD").font(.largeTitle.bold())
+                Text("Private local work metadata, reviewed only in an explicit date range.")
+                    .foregroundStyle(.secondary)
+
+                GroupBox("Local database") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        TextField("Absolute database file path", text: $databasePath)
+                            .textFieldStyle(.roundedBorder)
+                        Text("Enter one exact absolute file path. Opening it creates the parent folder if needed and acquires WWMD’s exclusive runtime lease. WWMD never scans for or infers a database path.")
+                            .font(.caption)
                             .foregroundStyle(.secondary)
-                    }
-
-                    if let health = agentConnection.health {
-                        Grid(alignment: .leading, horizontalSpacing: 24, verticalSpacing: 8) {
-                            GridRow {
-                                Text("Database")
-                                    .foregroundStyle(.secondary)
-                                Text(health.quickCheckPassed ? "Integrity check passed" : "Integrity check failed")
-                            }
-                            GridRow {
-                                Text("Ledger")
-                                    .foregroundStyle(.secondary)
-                                Text("\(health.eventCount) events; schema \(health.schemaVersion)")
-                            }
-                            GridRow {
-                                Text("Collection")
-                                    .foregroundStyle(.secondary)
-                                Text(health.globallyPaused ? "Globally paused" : "Not globally paused")
-                            }
-                        }
                         HStack {
+                            Button(model.isOpening ? "Opening…" : "Open selected database") {
+                                model.open(databasePath: databasePath)
+                            }
+                            .disabled(databasePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.isOpening)
+                            if model.isActive {
+                                Button("Refresh health") { model.refresh() }
+                                Button("Close database") { model.close() }
+                            }
+                        }
+                        if let activePath = model.currentDatabasePath {
+                            LabeledContent("Active database") {
+                                Text(activePath).font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+
+                GroupBox(model.statusTitle) {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(model.statusDetail)
+                        if let health = model.health {
+                            HStack(spacing: 28) {
+                                HealthValue(label: "Schema", value: "\(health.schemaVersion)")
+                                HealthValue(label: "Events", value: "\(health.eventCount)")
+                                HealthValue(label: "Database", value: health.quickCheckPassed ? "Healthy" : "Check failed")
+                                HealthValue(label: "Collection", value: health.globallyPaused ? "Paused" : "Running")
+                            }
                             Button(health.globallyPaused ? "Resume collection" : "Pause collection") {
-                                agentConnection.setCollectionPaused(!health.globallyPaused, using: configuration)
+                                model.setCollectionPaused(!health.globallyPaused)
                             }
-                            .disabled(!agentConnection.canControlCollection)
-                            Button("Refresh") {
-                                agentConnection.refresh(using: configuration)
-                            }
-                            .disabled(agentConnection.isConnecting || agentConnection.isMutating)
+                            .disabled(!model.canControlCollection)
                         }
                     }
+                    .padding(.top, 4)
+                }
 
-                    GroupBox("Safe summary and recommendations") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                DatePicker("From", selection: $summaryFrom, displayedComponents: [.date, .hourAndMinute])
-                                DatePicker("To", selection: $summaryTo, displayedComponents: [.date, .hourAndMinute])
-                            }
-                            Button(agentConnection.isLoadingDashboard ? "Loading…" : "Load selected range") {
-                                agentConnection.loadDashboard(
-                                    from: summaryFrom,
-                                    to: summaryTo,
-                                    using: configuration
-                                )
-                            }
-                            .disabled(
-                                agentConnection.health == nil ||
-                                agentConnection.isConnecting ||
-                                agentConnection.isMutating ||
-                                agentConnection.isLoadingDashboard
-                            )
+                GroupBox("Explicit date-range dashboard") {
+                    VStack(alignment: .leading, spacing: 12) {
+                        HStack {
+                            DatePicker("From", selection: $from, displayedComponents: [.date, .hourAndMinute])
+                            DatePicker("To", selection: $to, displayedComponents: [.date, .hourAndMinute])
+                        }
+                        Button(model.isLoadingDashboard ? "Loading…" : "Load dashboard") {
+                            model.loadDashboard(from: from, to: to)
+                        }
+                        .disabled(model.isLoadingDashboard || !model.isActive)
 
-                            if let message = agentConnection.dashboardMessage {
-                                Text(message)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            if let summary = agentConnection.summary {
-                                Text("\(summary.eventCount) safe events through ledger sequence \(summary.processedThroughSequence)")
-                                    .font(.subheadline)
-                                ForEach(summary.metrics, id: \.name) { metric in
-                                    HStack(alignment: .firstTextBaseline) {
-                                        Text(metric.name)
-                                        Spacer()
-                                        Text(metricDisplayValue(metric))
-                                            .monospacedDigit()
-                                        Text(metric.unit)
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .accessibilityElement(children: .combine)
-                                }
-                            }
-
-                            if agentConnection.summary != nil {
-                                Divider()
-                                Text("Recommendations")
-                                    .font(.subheadline)
-                                if agentConnection.recommendations.isEmpty {
-                                    Text("No evidence-backed recommendations are active in this selected range.")
-                                        .foregroundStyle(.secondary)
-                                } else {
-                                    ForEach(agentConnection.recommendations) { recommendation in
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(recommendation.title)
-                                                .font(.headline)
-                                            Text(recommendation.explanation)
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                            Text("Rule \(recommendation.ruleID) v\(recommendation.ruleVersion) · evidence grade \(recommendation.evidenceGrade)")
-                                                .font(.caption2)
-                                                .foregroundStyle(.secondary)
-                                        }
+                        if let message = model.dashboardMessage {
+                            Text(message).foregroundStyle(.red)
+                        }
+                        if let summary = model.summary {
+                            SummaryView(summary: summary)
+                        }
+                        if !model.recommendations.isEmpty {
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Recommendations").font(.headline)
+                                ForEach(model.recommendations) { item in
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.title).font(.subheadline.bold())
+                                        Text(item.explanation).font(.caption).foregroundStyle(.secondary)
                                     }
                                 }
                             }
                         }
-                        .padding(.top, 4)
                     }
-
-                    GroupBox("Signed agent configuration") {
-                        VStack(alignment: .leading, spacing: 10) {
-                            AgentConfigurationFields(
-                                machServiceName: $machServiceName,
-                                agentRequirement: $agentRequirement
-                            )
-                            HStack {
-                                Button(agentConnection.isConnecting ? "Checking…" : "Test signed agent connection") {
-                                    agentConnection.refresh(using: configuration)
-                                }
-                                .disabled(!configuration.isComplete || agentConnection.isConnecting || agentConnection.isMutating)
-                                if !configuration.isComplete {
-                                    Text("Both values are required. WWMD will not discover or invent them.")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                        .padding(.top, 4)
-                    }
-
-                    Text("WWMD does not open the database from the app. Health and pause state above are available only after the configured native XPC connection accepts the exact signing requirement.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    .padding(.top, 4)
                 }
-                .padding(24)
-                .frame(maxWidth: 650, alignment: .leading)
-            }
-        }
-        .onAppear {
-            agentConnection.adopt(configuration)
-        }
-        .onChange(of: machServiceName) { _ in
-            agentConnection.adopt(configuration)
-        }
-        .onChange(of: agentRequirement) { _ in
-            agentConnection.adopt(configuration)
-        }
-    }
 
-    private func metricDisplayValue(_ metric: XPCMetricResponse) -> String {
-        guard let value = metric.value else {
-            return metric.availability.replacingOccurrences(of: "_", with: " ")
-        }
-        return value.formatted(.number.precision(.fractionLength(0...2)))
-    }
-}
-
-private struct AgentConfigurationFields: View {
-    @Binding var machServiceName: String
-    @Binding var agentRequirement: String
-
-    var body: some View {
-        TextField("Mach service name", text: $machServiceName)
-            .textFieldStyle(.roundedBorder)
-        TextField("Agent code-signing requirement", text: $agentRequirement)
-            .textFieldStyle(.roundedBorder)
-        Text("These local settings contain a service identifier and a designated code-signing requirement, not a database path or a source permission.")
-            .font(.caption)
-            .foregroundStyle(.secondary)
-    }
-}
-
-private struct WWMDSettings: View {
-    @Binding var machServiceName: String
-    @Binding var agentRequirement: String
-
-    @EnvironmentObject private var agentConnection: AgentConnectionModel
-
-    private var configuration: AgentConnectionConfiguration {
-        AgentConnectionConfiguration(
-            machServiceName: machServiceName,
-            agentRequirement: agentRequirement
-        )
-    }
-
-    var body: some View {
-        Form {
-            Section("Signed agent") {
-                AgentConfigurationFields(
-                    machServiceName: $machServiceName,
-                    agentRequirement: $agentRequirement
-                )
-                Button(agentConnection.isConnecting ? "Checking…" : "Test signed agent connection") {
-                    agentConnection.refresh(using: configuration)
-                }
-                .disabled(!configuration.isComplete || agentConnection.isConnecting || agentConnection.isMutating)
-                Text(agentConnection.statusDetail)
-                    .font(.caption)
+                Text("Privacy: metadata only; no prompt, response, title, source, or shell content. The app owns the selected database while it is open and starts no socket, daemon, or XPC listener.")
+                    .font(.footnote)
                     .foregroundStyle(.secondary)
             }
-            Section("Collection") {
-                Text("Every adapter is opt-in. Global pause persists only in the configured signed agent.")
-            }
-            Section("Privacy") {
-                Text("WWMD v0 excludes prompts, responses, source contents, window titles, shell arguments, logs, environment values, clipboard, screenshots, keylogging, and browser history.")
-            }
-            Section("Codex CSV") {
-                Text("Import remains blocked until an actual CSV header and field contract is supplied.")
-            }
+            .padding(28)
         }
-        .padding()
-        .frame(width: 620)
-        .onAppear {
-            agentConnection.adopt(configuration)
+    }
+}
+
+private struct HealthValue: View {
+    let label: String
+    let value: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.headline)
         }
-        .onChange(of: machServiceName) { _ in
-            agentConnection.adopt(configuration)
-        }
-        .onChange(of: agentRequirement) { _ in
-            agentConnection.adopt(configuration)
+    }
+}
+
+private struct SummaryView: View {
+    let summary: XPCSummaryResponse
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Summary").font(.headline)
+            HStack(spacing: 28) {
+                HealthValue(label: "Events", value: "\(summary.eventCount)")
+                HealthValue(label: "Metrics", value: "\(summary.metrics.count)")
+                HealthValue(label: "Through sequence", value: "\(summary.processedThroughSequence)")
+            }
         }
     }
 }

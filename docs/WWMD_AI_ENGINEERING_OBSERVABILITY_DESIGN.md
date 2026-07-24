@@ -6,6 +6,28 @@ Author: root agent
 Audience: WWMD maintainers, security reviewers, and the implementation owner
 Status note: independent WWMD design; no predecessor code or data is copied
 
+## V0 architecture amendment — 2026-07-24
+
+The implementation owner explicitly changed V0 from the earlier multi-process
+native-XPC topology to **single-process local mode**. This amendment is the
+current product contract and supersedes every later reference in this document
+to an active V0 agent, Mach service, XPC client, signed XPC CLI, or app-to-agent
+process boundary. Those later XPC sections are retained only as design material
+for a future signed packaged release; they are not setup instructions or V0
+requirements.
+
+| V0 component | Current owner and boundary |
+|---|---|
+| WWMD.app | One menu-bar/viewer process explicitly opens one absolute database file and owns the in-process `WWMDAgentRuntime` and `TelemetryStore` actor. |
+| Database | The app has the only supported live runtime lease. A second app or `wwmdd` health diagnostic must fail rather than access the active database. |
+| Runtime | Coordinates storage and future opt-in adapters in-process. App close or quit stops runtime activity. |
+| IPC | No native XPC listener, Mach service, Unix socket, daemon, HTTP listener, or network service exists in V0. Native XPC code is deferred, never silently substituted. |
+| CLI | `wwmd` remains direct-database-free and is deferred until a separately approved signed release. `wwmdd --health` is a closed-app diagnostic and acquires the same lease. |
+
+The ownership, schema, privacy, source-opt-in, bounded-query, recovery, and
+independent-data rules below still apply. “Agent” in V0 now means the
+`WWMDAgentRuntime` coordinator, not a separately running process.
+
 ## Reconciliation record
 
 This document is the root-owned reconciliation of four independent, read-only
@@ -14,8 +36,8 @@ not extend, open, migrate, or copy a predecessor historical activity database.
 
 | Term | One meaning in this document | Owner | Boundary |
 |---|---|---|---|
-| WWMD app | Native menu-bar, preferences, and drill-down viewer process. | App process | Calls the agent only through versioned native XPC. |
-| WWMD agent | Persistent per-user collector and sole mutable database owner. | Agent process | Hosts the Mach XPC service; never exposes HTTP or a Unix socket. |
+| WWMD app | Native menu-bar, preferences, and drill-down viewer process. | App process | Explicitly opens the local database and owns the in-process runtime in V0. |
+| WWMD agent | Runtime coordinator and sole mutable database owner. | App process in V0 | No listener or separate process in V0; future XPC design is deferred. |
 | Core | Validation, identity, privacy gate, canonical model, and domain rules. | Core module | Has no source discovery and no UI. |
 | Adapter | Opt-in, statically linked in-process source reader. | Agent | May emit only validated, redacted source offers. |
 | Ledger | Immutable canonical TelemetryEventV1 rows. | Storage module | The sole source for rebuildable derived state. |
@@ -39,9 +61,9 @@ source contract is supplied.
 
 ## 2. Executive decision
 
-WWMD will be a Swift-native macOS 13+ menu-bar application with a persistent
-per-user agent, a signed read-only CLI, native XPC for control and queries, and
-one SQLite database in WAL mode. A single TelemetryStore actor in the agent
+WWMD V0 is a Swift-native macOS 13+ menu-bar application with one explicitly
+selected SQLite database in WAL mode. A single TelemetryStore actor in the
+app-owned runtime
 serializes every write. It persists immutable, versioned TelemetryEventV1
 records; typed projections and recommendation records are rebuilt
 deterministically from that ledger.
@@ -52,12 +74,11 @@ an explicit build/test wrapper, and user annotations. There are no dynamic
 plugins, network listener, cloud upload, background model calls, source
 content collection, or window-title capture.
 
-Native XPC is selected over a permission-only length-framed JSON Unix-domain
-socket because WWMD needs an explicit macOS peer identity boundary. SQLite/WAL
+V0 has no local IPC because it has one process. A Unix-domain socket is not
+added. Native XPC remains a separately deferred future-release option, to be
+reconsidered only with a signed multi-process packaging decision. SQLite/WAL
 remains the storage base because it fits a small local durable ledger better
-than a second analytics database or custom log. The principal trade-off is
-giving up unbounded source discovery and generic integrations for privacy,
-testability, and a smaller failure surface.
+than a second analytics database or custom log.
 
 ## 3. Independent architecture rationale
 
