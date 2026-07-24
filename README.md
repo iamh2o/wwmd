@@ -40,8 +40,9 @@ follow the [quickstart](docs/QUICKSTART.md).
   code-signing requirement. It supports health, bounded safe summary/evidence/
   recommendation queries, durable global pause control, and a two-phase
   deletion contract for explicit event scopes and registered output IDs. The
-  app uses that same authenticated client for health and global-pause control;
-  the `wwmd` CLI emits safe JSON and never opens the database itself.
+  app uses that same authenticated client for health, global-pause control,
+  and user-requested bounded summary/recommendation views; the `wwmd` CLI
+  emits safe JSON and never opens the database itself.
 - No prompt/response text, source contents, window titles, shell arguments,
   logs, environment values, clipboard, screenshots, keylogging, browser
   history, cloud upload, or background LLM analytics.

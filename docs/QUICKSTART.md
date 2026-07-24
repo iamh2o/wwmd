@@ -105,7 +105,7 @@ click **Open WWMD** to show the single main viewer window. The viewer exposes
 an explicit signed-agent configuration form and can show authenticated agent
 health or toggle durable global pause once the release prerequisites below are
 met. It never opens the local database itself and it does not infer a service
-name, signing requirement, collection source, summary, or export.
+name, signing requirement, collection source, query scope, or export.
 
 ## Production XPC prerequisite
 
@@ -125,6 +125,11 @@ the exact agent code-signing requirement in **WWMD → Signed agent
 configuration**, then choose **Test signed agent connection**. Do not enter a
 database path in either field. A failed test leaves collection controls
 disabled rather than connecting by another mechanism.
+
+After a successful test, use **Load selected range** in the viewer to request
+safe summary metrics and evidence-backed recommendations for the exact visible
+date range. WWMD does not auto-query a date range, expose event payloads, or
+turn on any source while connecting the viewer.
 
 ## Current collection prerequisites
 

@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import Foundation
 import SwiftUI
 import WWMDIPC
 
@@ -41,12 +42,22 @@ private final class AgentConnectionModel: ObservableObject {
         case failure(String)
     }
 
+    private enum DashboardAttempt: Sendable {
+        case success(XPCSummaryResponse, [XPCRecommendationItem])
+        case failure(String)
+    }
+
     @Published private(set) var health: XPCHealthResponse?
+    @Published private(set) var summary: XPCSummaryResponse?
+    @Published private(set) var recommendations: [XPCRecommendationItem] = []
+    @Published private(set) var dashboardMessage: String?
+    @Published private(set) var isLoadingDashboard = false
     @Published private(set) var isMutating = false
     @Published private var state: State = .setupRequired
 
     private var configuration = AgentConnectionConfiguration(machServiceName: "", agentRequirement: "")
     private var operationID = UUID()
+    private var dashboardOperationID = UUID()
 
     var statusTitle: String {
         switch state {
@@ -91,7 +102,12 @@ private final class AgentConnectionModel: ObservableObject {
         guard self.configuration != configuration else { return }
         self.configuration = configuration
         operationID = UUID()
+        dashboardOperationID = UUID()
         health = nil
+        summary = nil
+        recommendations = []
+        dashboardMessage = nil
+        isLoadingDashboard = false
         isMutating = false
         state = configuration.isComplete ? .ready : .setupRequired
     }
@@ -104,7 +120,12 @@ private final class AgentConnectionModel: ObservableObject {
         }
         let currentOperationID = UUID()
         operationID = currentOperationID
+        dashboardOperationID = UUID()
         health = nil
+        summary = nil
+        recommendations = []
+        dashboardMessage = nil
+        isLoadingDashboard = false
         isMutating = false
         state = .connecting
 
@@ -128,7 +149,12 @@ private final class AgentConnectionModel: ObservableObject {
                 self.state = .active
             case .failure(let message):
                 self.health = nil
+                self.dashboardOperationID = UUID()
+                self.summary = nil
+                self.recommendations = []
+                self.isLoadingDashboard = false
                 self.state = .unavailable(message)
+                self.dashboardMessage = message
             }
         }
     }
@@ -171,7 +197,74 @@ private final class AgentConnectionModel: ObservableObject {
                 self.state = .active
             case .failure(let message):
                 self.health = nil
+                self.dashboardOperationID = UUID()
+                self.summary = nil
+                self.recommendations = []
+                self.isLoadingDashboard = false
                 self.state = .unavailable(message)
+                self.dashboardMessage = message
+            }
+        }
+    }
+
+    func loadDashboard(
+        from: Date,
+        to: Date,
+        using configuration: AgentConnectionConfiguration
+    ) {
+        adopt(configuration)
+        guard configuration.isComplete, health != nil else {
+            dashboardMessage = "Connect to the configured signed agent before loading a summary."
+            return
+        }
+        let summaryQuery = SummaryQuery(from: from, to: to, metricNames: [])
+        let recommendationScope = XPCScopedQuery(from: from, to: to)
+        do {
+            try XPCContractValidator.validate(summaryQuery)
+            try XPCContractValidator.validateScope(recommendationScope)
+        } catch {
+            summary = nil
+            recommendations = []
+            dashboardMessage = error.localizedDescription
+            return
+        }
+
+        let currentDashboardOperationID = UUID()
+        dashboardOperationID = currentDashboardOperationID
+        summary = nil
+        recommendations = []
+        dashboardMessage = nil
+        isLoadingDashboard = true
+
+        Task { [configuration, currentDashboardOperationID] in
+            let result = await Task.detached(priority: .userInitiated) { () -> DashboardAttempt in
+                do {
+                    let client = try NativeXPCClient(
+                        machServiceName: configuration.machServiceName,
+                        agentCodeSigningRequirement: configuration.agentRequirement
+                    )
+                    let summary = try client.summary(summaryQuery)
+                    let recommendations = try client.recommendations(recommendationScope)
+                    return .success(summary, recommendations.items)
+                } catch {
+                    return .failure(error.localizedDescription)
+                }
+            }.value
+
+            guard self.dashboardOperationID == currentDashboardOperationID else { return }
+            self.isLoadingDashboard = false
+            switch result {
+            case .success(let summary, let recommendations):
+                self.summary = summary
+                self.recommendations = recommendations
+            case .failure(let message):
+                self.health = nil
+                self.dashboardOperationID = UUID()
+                self.summary = nil
+                self.recommendations = []
+                self.isLoadingDashboard = false
+                self.state = .unavailable(message)
+                self.dashboardMessage = message
             }
         }
     }
@@ -271,6 +364,8 @@ private struct WWMDViewer: View {
     @Binding var agentRequirement: String
 
     @EnvironmentObject private var agentConnection: AgentConnectionModel
+    @State private var summaryFrom = Calendar.current.startOfDay(for: Date())
+    @State private var summaryTo = Date()
 
     private var configuration: AgentConnectionConfiguration {
         AgentConnectionConfiguration(
@@ -329,6 +424,74 @@ private struct WWMDViewer: View {
                         }
                     }
 
+                    GroupBox("Safe summary and recommendations") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                DatePicker("From", selection: $summaryFrom, displayedComponents: [.date, .hourAndMinute])
+                                DatePicker("To", selection: $summaryTo, displayedComponents: [.date, .hourAndMinute])
+                            }
+                            Button(agentConnection.isLoadingDashboard ? "Loading…" : "Load selected range") {
+                                agentConnection.loadDashboard(
+                                    from: summaryFrom,
+                                    to: summaryTo,
+                                    using: configuration
+                                )
+                            }
+                            .disabled(
+                                agentConnection.health == nil ||
+                                agentConnection.isConnecting ||
+                                agentConnection.isMutating ||
+                                agentConnection.isLoadingDashboard
+                            )
+
+                            if let message = agentConnection.dashboardMessage {
+                                Text(message)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if let summary = agentConnection.summary {
+                                Text("\(summary.eventCount) safe events through ledger sequence \(summary.processedThroughSequence)")
+                                    .font(.subheadline)
+                                ForEach(summary.metrics, id: \.name) { metric in
+                                    HStack(alignment: .firstTextBaseline) {
+                                        Text(metric.name)
+                                        Spacer()
+                                        Text(metricDisplayValue(metric))
+                                            .monospacedDigit()
+                                        Text(metric.unit)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .accessibilityElement(children: .combine)
+                                }
+                            }
+
+                            if agentConnection.summary != nil {
+                                Divider()
+                                Text("Recommendations")
+                                    .font(.subheadline)
+                                if agentConnection.recommendations.isEmpty {
+                                    Text("No evidence-backed recommendations are active in this selected range.")
+                                        .foregroundStyle(.secondary)
+                                } else {
+                                    ForEach(agentConnection.recommendations) { recommendation in
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(recommendation.title)
+                                                .font(.headline)
+                                            Text(recommendation.explanation)
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                            Text("Rule \(recommendation.ruleID) v\(recommendation.ruleVersion) · evidence grade \(recommendation.evidenceGrade)")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        .padding(.top, 4)
+                    }
+
                     GroupBox("Signed agent configuration") {
                         VStack(alignment: .leading, spacing: 10) {
                             AgentConfigurationFields(
@@ -367,6 +530,13 @@ private struct WWMDViewer: View {
         .onChange(of: agentRequirement) { _ in
             agentConnection.adopt(configuration)
         }
+    }
+
+    private func metricDisplayValue(_ metric: XPCMetricResponse) -> String {
+        guard let value = metric.value else {
+            return metric.availability.replacingOccurrences(of: "_", with: " ")
+        }
+        return value.formatted(.number.precision(.fractionLength(0...2)))
     }
 }
 
